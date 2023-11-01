@@ -1,479 +1,4 @@
-/* SPDX-License-Identifier: BSD-3-Clause
- * Copyright 2020 Mellanox Technologies, Ltd
- *
- * This file contain the application main file
- * This application provides the user the ability to test the
- * insertion rate for specific rte_flow rule under stress state ~4M rule/
- *
- * Then it will also provide packet per second measurement after installing
- * all rules, the user may send traffic to test the PPS that match the rules
- * after all rules are installed, to check performance or functionality after
- * the stress.
- *
- * The flows insertion will go for all ports first, then it will print the
- * results, after that the application will go into forwarding packets mode
- * it will start receiving traffic if any and then forwarding it back and
- * gives packet per second measurement.
- */
-
-#include <locale.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <inttypes.h>
-#include <stdarg.h>
-#include <errno.h>
-#include <getopt.h>
-#include <stdbool.h>
-#include <sys/time.h>
-#include <signal.h>
-#include <unistd.h>
-
-#include <rte_malloc.h>
-#include <rte_mempool.h>
-#include <rte_mbuf.h>
-#include <rte_ethdev.h>
-#include <rte_flow.h>
-#include <rte_mtr.h>
-
-#include "config.h"
-#include "actions_gen.h"
-#include "flow_gen.h"
-
-#define MAX_BATCHES_COUNT          100
-#define DEFAULT_RULES_COUNT    4000000
-#define DEFAULT_RULES_BATCH     100000
-#define DEFAULT_GROUP                0
-
-#define HAIRPIN_RX_CONF_FORCE_MEMORY  (0x0001)
-#define HAIRPIN_TX_CONF_FORCE_MEMORY  (0x0002)
-
-#define HAIRPIN_RX_CONF_LOCKED_MEMORY (0x0010)
-#define HAIRPIN_RX_CONF_RTE_MEMORY    (0x0020)
-
-#define HAIRPIN_TX_CONF_LOCKED_MEMORY (0x0100)
-#define HAIRPIN_TX_CONF_RTE_MEMORY    (0x0200)
-
-struct rte_flow *flow;
-static uint8_t flow_group;
-
-static uint64_t encap_data;
-static uint64_t decap_data;
-static uint64_t all_actions[RTE_COLORS][MAX_ACTIONS_NUM];
-static char *actions_str[RTE_COLORS];
-
-static uint64_t flow_items[MAX_ITEMS_NUM];
-static uint64_t flow_actions[MAX_ACTIONS_NUM];
-static uint64_t flow_attrs[MAX_ATTRS_NUM];
-static uint32_t policy_id[MAX_PORTS];
-static uint8_t items_idx, actions_idx, attrs_idx;
-
-static uint64_t ports_mask;
-static uint64_t hairpin_conf_mask;
-static uint16_t dst_ports[RTE_MAX_ETHPORTS];
-static volatile bool force_quit;
-static bool dump_iterations;
-static bool delete_flag;
-static bool dump_socket_mem_flag;
-static bool enable_fwd;
-static bool unique_data;
-static bool policy_mtr;
-static bool packet_mode;
-
-static uint8_t rx_queues_count;
-static uint8_t tx_queues_count;
-static uint8_t rxd_count;
-static uint8_t txd_count;
-static uint32_t mbuf_size;
-static uint32_t mbuf_cache_size;
-static uint32_t total_mbuf_num;
-
-static struct rte_mempool *mbuf_mp;
-static uint32_t nb_lcores;
-static uint32_t rules_count;
-static uint32_t rules_batch;
-static uint32_t hairpin_queues_num; /* total hairpin q number - default: 0 */
-static uint32_t nb_lcores;
-static uint8_t max_priority;
-static uint32_t rand_seed;
-static uint64_t meter_profile_values[3]; /* CIR CBS EBS values. */
-
-#define MAX_PKT_BURST    32
-#define LCORE_MODE_PKT    1
-#define LCORE_MODE_STATS  2
-#define MAX_STREAMS      64
-#define METER_CREATE	  1
-#define METER_DELETE	  2
-
-struct stream {
-	int tx_port;
-	int tx_queue;
-	int rx_port;
-	int rx_queue;
-};
-
-struct lcore_info {
-	int mode;
-	int streams_nb;
-	struct stream streams[MAX_STREAMS];
-	/* stats */
-	uint64_t tx_pkts;
-	uint64_t tx_drops;
-	uint64_t rx_pkts;
-	struct rte_mbuf *pkts[MAX_PKT_BURST];
-} __rte_cache_aligned;
-
-static struct lcore_info lcore_infos[RTE_MAX_LCORE];
-
-struct used_cpu_time {
-	double insertion[MAX_PORTS][RTE_MAX_LCORE];
-	double deletion[MAX_PORTS][RTE_MAX_LCORE];
-};
-
-struct multi_cores_pool {
-	uint32_t cores_count;
-	uint32_t rules_count;
-	struct used_cpu_time meters_record;
-	struct used_cpu_time flows_record;
-	int64_t last_alloc[RTE_MAX_LCORE];
-	int64_t current_alloc[RTE_MAX_LCORE];
-} __rte_cache_aligned;
-
-static struct multi_cores_pool mc_pool = {
-	.cores_count = 1,
-};
-
-static const struct option_dict {
-	const char *str;
-	const uint64_t mask;
-	uint64_t *map;
-	uint8_t *map_idx;
-
-} flow_options[] = {
-	{
-		.str = "ether",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_ETH),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "ipv4",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_IPV4),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "ipv6",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_IPV6),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "vlan",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_VLAN),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "tcp",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_TCP),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "udp",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_UDP),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "vxlan",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_VXLAN),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "vxlan-gpe",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_VXLAN_GPE),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "gre",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_GRE),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "geneve",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_GENEVE),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "gtp",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_GTP),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "meta",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_META),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "tag",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_TAG),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "icmpv4",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_ICMP),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "icmpv6",
-		.mask = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_ICMP6),
-		.map = &flow_items[0],
-		.map_idx = &items_idx
-	},
-	{
-		.str = "ingress",
-		.mask = INGRESS,
-		.map = &flow_attrs[0],
-		.map_idx = &attrs_idx
-	},
-	{
-		.str = "egress",
-		.mask = EGRESS,
-		.map = &flow_attrs[0],
-		.map_idx = &attrs_idx
-	},
-	{
-		.str = "transfer",
-		.mask = TRANSFER,
-		.map = &flow_attrs[0],
-		.map_idx = &attrs_idx
-	},
-	{
-		.str = "port-id",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_PORT_ID),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "rss",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_RSS),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "queue",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_QUEUE),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "jump",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_JUMP),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "mark",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_MARK),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "count",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_COUNT),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-meta",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_SET_META),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-tag",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_SET_TAG),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "drop",
-		.mask = FLOW_ACTION_MASK(RTE_FLOW_ACTION_TYPE_DROP),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-src-mac",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_MAC_SRC
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-dst-mac",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_MAC_DST
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-src-ipv4",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_IPV4_SRC
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-dst-ipv4",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_IPV4_DST
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-src-ipv6",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_IPV6_SRC
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-dst-ipv6",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_IPV6_DST
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-src-tp",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_TP_SRC
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-dst-tp",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_TP_DST
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "inc-tcp-ack",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_INC_TCP_ACK
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "dec-tcp-ack",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_DEC_TCP_ACK
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "inc-tcp-seq",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_INC_TCP_SEQ
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "dec-tcp-seq",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_DEC_TCP_SEQ
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-ttl",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_TTL
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "dec-ttl",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_DEC_TTL
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-ipv4-dscp",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_IPV4_DSCP
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "set-ipv6-dscp",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_SET_IPV6_DSCP
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "flag",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_FLAG
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "meter",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_METER
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "vxlan-encap",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_VXLAN_ENCAP
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-	{
-		.str = "vxlan-decap",
-		.mask = FLOW_ACTION_MASK(
-			RTE_FLOW_ACTION_TYPE_VXLAN_DECAP
-		),
-		.map = &flow_actions[0],
-		.map_idx = &actions_idx
-	},
-};
+#include "main.h"
 
 static void
 usage(char *progname)
@@ -741,7 +266,7 @@ args_parse(int argc, char **argv)
 	hairpin_queues_num = 0;
 	argvopt = argv;
 
-	printf(":: Flow -> ");
+	printf("\n:: Flow -> ");
 	while ((opt = getopt_long(argc, argvopt, "",
 				lgopts, &opt_idx)) != EOF) {
 		switch (opt) {
@@ -983,8 +508,7 @@ args_parse(int argc, char **argv)
 		}
 	}
 	if (rules_count % rules_batch != 0) {
-		rte_exit(EXIT_FAILURE,
-			 "rules_count %% rules_batch should be 0\n");
+		rules_batch = rules_count;
 	}
 	if (rules_count / rules_batch > MAX_BATCHES_COUNT) {
 		rte_exit(EXIT_FAILURE,
@@ -1457,7 +981,12 @@ insert_flows(int port_id, uint8_t core_id, uint16_t dst_port_id)
 
 		if (!flow) {
 			print_flow_error(error);
-			rte_exit(EXIT_FAILURE, "Error in creating flow\n");
+            if (counter == 0)
+                rte_exit(EXIT_FAILURE, "Error in creating n flows\n");
+
+			printf("Error in creating flow maxed out at %d\n", counter);
+            rules_count = counter;
+            return flows_list;
 		}
 
 		flows_list[flow_index++] = flow;
@@ -1520,10 +1049,48 @@ flows_handler(uint8_t core_id)
 		mc_pool.last_alloc[core_id] = (int64_t)dump_socket_mem(stdout);
 		if (has_meter())
 			meters_handler(port_id, core_id, METER_CREATE);
+
 		flows_list = insert_flows(port_id, core_id,
-						dst_ports[port_idx++]);
-		if (flows_list == NULL)
-			rte_exit(EXIT_FAILURE, "Error: Insertion Failed!\n");
+						dst_ports[port_idx]);
+		if (flows_list != NULL && rules_count < mc_pool.rules_count ) {
+            uint32_t i;
+            struct rte_flow_error error;
+            int rules_count_per_core = rules_count / mc_pool.cores_count;
+
+            printf("\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Failed to run test with Rules Count: %d\n\n", mc_pool.rules_count);
+            printf(">>>>>>>>>>>>>>>>>>>>>>>>>>>>> Rerunning with Rules Count: %d\n\n", rules_count);
+
+            /* Clean up from previous run */
+            for (i = 0; i < (uint32_t) rules_count_per_core; i++) {
+        		if (flows_list[i] == 0)
+        			break;
+
+        		memset(&error, 0x33, sizeof(error));
+        		if (rte_flow_destroy(port_id, flows_list[i], &error)) {
+        			print_flow_error(error);
+        			rte_exit(EXIT_FAILURE, "Error in deleting flow\n");
+        		}
+            }
+
+            if (has_meter())
+				meters_handler(port_id, core_id, METER_DELETE);
+
+            mc_pool.rules_count = rules_count;
+
+            if(rules_batch > rules_count)
+               rules_batch = rules_count;
+
+            mc_pool.last_alloc[core_id] = (int64_t)dump_socket_mem(stdout);
+
+            if (has_meter())
+			    meters_handler(port_id, core_id, METER_CREATE);
+
+            flows_list = insert_flows(port_id, core_id,
+						dst_ports[port_idx]);
+            if (flows_list == NULL)
+                rte_exit(EXIT_FAILURE, "ERROR RERUNNING THE TEST");
+        }
+        port_idx++;
 		mc_pool.current_alloc[core_id] = (int64_t)dump_socket_mem(stdout);
 
 		/* Deletion part. */
@@ -1666,7 +1233,7 @@ run_rte_flow_handler_cores(void *data __rte_unused)
 	RTE_LCORE_FOREACH(i) {
 		/*  If core not needed return. */
 		if (lcore_id == i) {
-			printf(":: lcore %d mapped with index %d\n", lcore_id, lcore_counter);
+			//printf(":: lcore %d mapped with index %d\n", lcore_id, lcore_counter);
 			if (lcore_counter >= (int) mc_pool.cores_count)
 				return 0;
 			break;
@@ -1937,6 +1504,104 @@ init_lcore_info(void)
 		}
 }
 
+const char *
+rsstypes_to_str(uint64_t rss_type)
+{
+	uint16_t i;
+
+	for (i = 0; rss_type_table[i].str != NULL; i++) {
+		if (rss_type_table[i].rss_type == rss_type)
+			return rss_type_table[i].str;
+	}
+
+	return NULL;
+}
+
+
+static void
+rss_offload_types_display(uint64_t offload_types, uint16_t char_num_per_line)
+{
+	uint16_t user_defined_str_len;
+	uint16_t total_len = 0;
+	uint16_t str_len = 0;
+	uint64_t rss_offload;
+	uint16_t i;
+
+	for (i = 0; i < sizeof(offload_types) * CHAR_BIT; i++) {
+		rss_offload = RTE_BIT64(i);
+		if ((offload_types & rss_offload) != 0) {
+			const char *p = rsstypes_to_str(rss_offload);
+
+			user_defined_str_len =
+				strlen("user-defined-") + (i / 10 + 1);
+			str_len = p ? strlen(p) : user_defined_str_len;
+			str_len += 2; /* add two spaces */
+			if (total_len + str_len >= char_num_per_line) {
+				total_len = 0;
+				printf("\n");
+			}
+
+			if (p)
+				printf("  %s", p);
+			else
+				printf("  user-defined-%u", i);
+			total_len += str_len;
+		}
+	}
+	printf("\n");
+}
+
+static void
+print_dev_capabilities(uint64_t capabilities)
+{
+	uint64_t single_capa;
+	int begin;
+	int end;
+	int bit;
+
+	if (capabilities == 0)
+		return;
+
+	begin = rte_ctz64(capabilities);
+	end = sizeof(capabilities) * CHAR_BIT - rte_clz64(capabilities);
+
+	single_capa = 1ULL << begin;
+	for (bit = begin; bit < end; bit++) {
+		if (capabilities & single_capa)
+			printf(" %s",
+			       rte_eth_dev_capability_name(single_capa));
+		single_capa <<= 1;
+	}
+}
+
+static void
+print_rx_offloads(uint64_t offloads)
+{
+	uint64_t single_offload;
+	int begin;
+	int end;
+	int bit;
+
+	if (offloads == 0)
+		return;
+
+	begin = rte_ctz64(offloads);
+	end = sizeof(offloads) * CHAR_BIT - rte_clz64(offloads);
+
+	single_offload = 1ULL << begin;
+	for (bit = begin; bit < end; bit++) {
+		if (offloads & single_offload)
+			printf(" %s",
+			       rte_eth_dev_rx_offload_name(single_offload));
+		single_offload <<= 1;
+	}
+}
+
+/*
+ * Receive Side Scaling (RSS) configuration.
+ */
+uint64_t rss_hf = GET_RSS_HF(); /* RSS IP by default. */
+
 static void
 init_port(void)
 {
@@ -1946,15 +1611,17 @@ init_port(void)
 	uint16_t port_id;
 	uint16_t nr_ports;
 	uint16_t nr_queues;
+    uint64_t queue_offloads;
+	uint64_t port_offloads;
 	struct rte_eth_hairpin_conf hairpin_conf = {
 		.peer_count = 1,
 	};
 	struct rte_eth_conf port_conf = {
 		.rx_adv_conf = {
-			.rss_conf.rss_hf =
-				GET_RSS_HF(),
+			.rss_conf.rss_hf = GET_RSS_HF(),
 		}
 	};
+
 	struct rte_eth_txconf txq_conf;
 	struct rte_eth_rxconf rxq_conf;
 	struct rte_eth_dev_info dev_info;
@@ -1962,6 +1629,7 @@ init_port(void)
 	nr_queues = rx_queues_count;
 	if (hairpin_queues_num != 0)
 		nr_queues = rx_queues_count + hairpin_queues_num;
+
 
 	nr_ports = rte_eth_dev_count_avail();
 	if (nr_ports == 0)
@@ -1979,6 +1647,8 @@ init_port(void)
 
 		rx_metadata |= RTE_ETH_RX_METADATA_USER_FLAG;
 		rx_metadata |= RTE_ETH_RX_METADATA_USER_MARK;
+      	rx_metadata |= RTE_ETH_RX_METADATA_TUNNEL_ID;
+
 
 		ret = rte_eth_rx_metadata_negotiate(port_id, &rx_metadata);
 		if (ret == 0) {
@@ -1991,6 +1661,11 @@ init_port(void)
 				printf(":: flow action MARK will not affect Rx mbufs on port=%u\n",
 				       port_id);
 			}
+
+            if (!(rx_metadata & RTE_ETH_RX_METADATA_TUNNEL_ID)) {
+			        printf(":: flow tunnel offload support might be limited or unavailable on port %u\n",
+				    port_id);
+		}
 		} else if (ret != -ENOTSUP) {
 			rte_exit(EXIT_FAILURE, "Error when negotiating Rx meta features on port=%u: %s\n",
 				 port_id, rte_strerror(-ret));
@@ -2002,6 +1677,59 @@ init_port(void)
 				"Error during getting device"
 				" (port %u) info: %s\n",
 				port_id, strerror(-ret));
+
+        if (nr_queues > 1) {
+    		port_conf.rx_adv_conf.rss_conf.rss_key = NULL;
+    		port_conf.rx_adv_conf.rss_conf.rss_hf =
+    			rss_hf & dev_info.flow_type_rss_offloads;
+    	} else {
+    		port_conf.rx_adv_conf.rss_conf.rss_key = NULL;
+    		port_conf.rx_adv_conf.rss_conf.rss_hf = 0;
+    	}
+
+        printf("\n\nDevice capabilities: 0x%"PRIx64"(", dev_info.dev_capa);
+    	print_dev_capabilities(dev_info.dev_capa);
+    	printf(" )\n");
+
+    	if (dev_info.hash_key_size > 0)
+    		printf("Hash key size in bytes: %u\n", dev_info.hash_key_size);
+    	if (dev_info.reta_size > 0)
+    		printf("Redirection table size: %u\n", dev_info.reta_size);
+    	if (!dev_info.flow_type_rss_offloads)
+    		printf("No RSS offload flow type is supported.\n");
+    	else {
+    		printf("Supported RSS offload flow types:\n");
+    		rss_offload_types_display(dev_info.flow_type_rss_offloads,
+    				RSS_TYPES_CHAR_NUM_PER_LINE);
+    	}
+
+    	/* Show switch info only if valid switch domain and port id is set */
+    	if (dev_info.switch_info.domain_id !=
+    	 	RTE_ETH_DEV_SWITCH_DOMAIN_ID_INVALID) {
+    		if (dev_info.switch_info.name)
+    			printf("Switch name: %s\n", dev_info.switch_info.name);
+
+    		printf("Switch domain Id: %u\n",
+    			dev_info.switch_info.domain_id);
+    		printf("Switch Port Id: %u\n",
+    			dev_info.switch_info.port_id);
+    		if ((dev_info.dev_capa & RTE_ETH_DEV_CAPA_RXQ_SHARE) != 0)
+    			printf("Switch Rx domain: %u\n",
+    			       dev_info.switch_info.rx_domain);
+    	}
+
+        queue_offloads = dev_info.rx_queue_offload_capa;
+        port_offloads = dev_info.rx_offload_capa ^ queue_offloads;
+
+        printf("Rx Offloading Capabilities of port %d :\n", port_id);
+        printf("  Per Queue :");
+        print_rx_offloads(queue_offloads);
+
+        printf("\n");
+        printf("  Per Port  :");
+        print_rx_offloads(port_offloads);
+        printf("\n\n");
+
 
 		port_conf.txmode.offloads &= dev_info.tx_offload_capa;
 		port_conf.rxmode.offloads &= dev_info.rx_offload_capa;
@@ -2149,7 +1877,7 @@ main(int argc, char **argv)
 	if (nb_lcores <= 1)
 		rte_exit(EXIT_FAILURE, "This app needs at least two cores\n");
 
-	printf(":: Flows Count per port: %d\n\n", rules_count);
+	printf(":: Flows Count per port: %d\n", rules_count);
 
 	rte_srand(rand_seed);
 

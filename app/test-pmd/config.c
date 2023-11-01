@@ -914,6 +914,7 @@ port_infos_display(portid_t port_id)
 	printf("Device capabilities: 0x%"PRIx64"(", dev_info.dev_capa);
 	print_dev_capabilities(dev_info.dev_capa);
 	printf(" )\n");
+
 	/* Show switch info only if valid switch domain and port id is set */
 	if (dev_info.switch_info.domain_id !=
 		RTE_ETH_DEV_SWITCH_DOMAIN_ID_INVALID) {

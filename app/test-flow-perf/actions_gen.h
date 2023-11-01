@@ -9,7 +9,7 @@
 #define FLOW_PERF_ACTION_GEN
 
 #include <rte_flow.h>
-
+#include <rte_ethdev.h>
 #include "config.h"
 
 #define RTE_IP_TYPE_UDP	17

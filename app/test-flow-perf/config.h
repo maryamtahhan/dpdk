@@ -6,6 +6,7 @@
 #define FLOW_ACTION_MASK(_x) (UINT64_C(1) << _x)
 #define FLOW_ATTR_MASK(_x) (UINT64_C(1) << _x)
 #define GET_RSS_HF() (RTE_ETH_RSS_IP)
+#define RSS_TYPES_CHAR_NUM_PER_LINE 64
 
 /* Configuration */
 #define RXQ_NUM 1
@@ -32,3 +33,4 @@
 #define MAX_ITEMS_NUM 32
 #define MAX_ACTIONS_NUM 32
 #define MAX_ATTRS_NUM 16
+
