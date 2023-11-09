@@ -547,3 +547,18 @@ rss_type_info_t rss_type_table[] = {
 	{ "l3-src-only", RTE_ETH_RSS_L3_SRC_ONLY },
 	{ NULL, 0},
 };
+
+enum print_warning {
+	ENABLED_WARN = 0,
+	DISABLED_WARN
+};
+
+#define RTE_PORT_ALL            (~(uint16_t)0x0)
+
+int port_flow_get_info(uint16_t port_id);
+int port_flow_get_info_all(void);
+int
+port_flow_configure(uint16_t port_id,
+	const struct rte_flow_port_attr *port_attr,
+	uint16_t nb_queue,
+	const struct rte_flow_queue_attr *queue_attr);

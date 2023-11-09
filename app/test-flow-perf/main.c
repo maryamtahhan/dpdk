@@ -177,6 +177,7 @@ args_parse(int argc, char **argv)
     static const struct option lgopts[] = {
         /* Control */
         { "help",                       0, 0, 0 },
+        { "port-info",                  0, 0, 0 },
         { "rules-count",                1, 0, 0 },
         { "rules-batch",                1, 0, 0 },
         { "dump-iterations",            0, 0, 0 },
@@ -266,13 +267,17 @@ args_parse(int argc, char **argv)
     hairpin_queues_num = 0;
     argvopt = argv;
 
-    printf("\n:: Flow -> ");
     while ((opt = getopt_long(argc, argvopt, "",
                 lgopts, &opt_idx)) != EOF) {
         switch (opt) {
         case 0:
             if (strcmp(lgopts[opt_idx].name, "help") == 0) {
                 usage(argv[0]);
+                exit(EXIT_SUCCESS);
+            }
+
+            if (strcmp(lgopts[opt_idx].name, "port-info") == 0) {
+                port_flow_get_info_all();
                 exit(EXIT_SUCCESS);
             }
 
@@ -1629,15 +1634,17 @@ port_flow_complain(struct rte_flow_error *error)
         errstr = "unknown type";
     else
         errstr = errstrlist[error->type];
-    fprintf(stderr, "%s(): Caught PMD error type %d (%s): %s%s: %s\n",
+
+    fprintf(stderr, "%s():: Caught PMD error type %d (%s): %s%s: %s\n",
         __func__, error->type, errstr,
         error->cause ? (snprintf(buf, sizeof(buf), "cause: %p, ",
                      error->cause), buf) : "",
         error->message ? error->message : "(no stated reason)",
-        rte_strerror(err));
+        (rte_errno < 0) ? rte_strerror(err) : "");
 
     switch (error->type) {
     case RTE_FLOW_ERROR_TYPE_ATTR_TRANSFER:
+        printf("%s:%d", __FUNCTION__, __LINE__);
         fprintf(stderr, "The status suggests the use of \"transfer\" "
                 "as the possible cause of the failure. Make "
                 "sure that the flow in question and its "
@@ -1682,10 +1689,6 @@ init_port(void)
     struct rte_eth_txconf txq_conf;
     struct rte_eth_rxconf rxq_conf;
     struct rte_eth_dev_info dev_info;
-    struct rte_flow_port_info port_info;
-    struct rte_flow_queue_info queue_info;
-    struct rte_flow_error error;
-
 
     nr_queues = rx_queues_count;
     if (hairpin_queues_num != 0)
@@ -1731,6 +1734,7 @@ init_port(void)
             rte_exit(EXIT_FAILURE, "Error when negotiating Rx meta features on port=%u: %s\n",
                  port_id, rte_strerror(-ret));
         }
+
 
         ret = rte_eth_dev_info_get(port_id, &dev_info);
         if (ret != 0)
@@ -1803,6 +1807,28 @@ init_port(void)
                 ":: cannot configure device: err=%d, port=%u\n",
                 ret, port_id);
 
+        // memset(&error, 0x99, sizeof(error));
+    	// memset(&port_info, 0, sizeof(port_info));
+    	// memset(&queue_info, 0, sizeof(queue_info));
+        // if (rte_flow_info_get(port_id, &port_info, &queue_info, &error) != 0) { // MT probably only supported on MLNX
+        //     printf(":: Error getting flow info for port: %d, skipping for now\n", port_id);
+        //     port_flow_complain(&error);
+        // } else {
+        //     printf("\n\nFlow capabilities: \n");
+        //     printf("Flow engine resources on port %u:\n"
+        //        "Number of queues: %d\n"
+        //        "Size of queues: %d\n"
+        //        "Number of counters: %d\n"
+        //        "Number of aging objects: %d\n"
+        //        "Number of meter actions: %d\n",
+        //        port_id, port_info.max_nb_queues,
+        //        queue_info.max_size,
+        //        port_info.max_nb_counters,
+        //        port_info.max_nb_aging_objects,
+        //        port_info.max_nb_meters);
+        // }
+
+
         rxq_conf = dev_info.default_rxconf;
         for (std_queue = 0; std_queue < rx_queues_count; std_queue++) {
             ret = rte_eth_rx_queue_setup(port_id, std_queue, rxd_count,
@@ -1832,27 +1858,6 @@ init_port(void)
             rte_exit(EXIT_FAILURE,
                 ":: promiscuous mode enable failed: err=%s, port=%u\n",
                 rte_strerror(-ret), port_id);
-
-
-        if (rte_flow_info_get(port_id, &port_info, &queue_info, &error)) { // MT probably only supported on MLNX
-            port_flow_complain(&error);
-            // rte_exit(EXIT_FAILURE,
-            //     ":: cannot Retrieve flow capabilities for device: err=%d, port=%u\n",
-            //     ret, port_id);
-        } else {
-            printf("\n\nFlow capabilities: \n");
-            printf("Flow engine resources on port %u:\n"
-               "Number of queues: %d\n"
-               "Size of queues: %d\n"
-               "Number of counters: %d\n"
-               "Number of aging objects: %d\n"
-               "Number of meter actions: %d\n",
-               port_id, port_info.max_nb_queues,
-               queue_info.max_size,
-               port_info.max_nb_counters,
-               port_info.max_nb_aging_objects,
-               port_info.max_nb_meters);
-        }
 
         if (hairpin_queues_num != 0) {
             /*
@@ -1911,6 +1916,145 @@ init_port(void)
 
         printf(":: initializing port: %d done\n", port_id);
     }
+}
+
+static int
+port_id_is_invalid(uint16_t port_id, enum print_warning warning)
+{
+	uint16_t pid;
+
+	if (port_id == (uint16_t)RTE_PORT_ALL)
+		return 0;
+
+	RTE_ETH_FOREACH_DEV(pid)
+		if (port_id == pid)
+			return 0;
+
+	if (warning == ENABLED_WARN)
+		fprintf(stderr, "Invalid port %d\n", port_id);
+
+	return 1;
+}
+
+/** Configure flow management resources. */
+int
+port_flow_configure(uint16_t port_id,
+	const struct rte_flow_port_attr *port_attr,
+	uint16_t nb_queue,
+	const struct rte_flow_queue_attr *queue_attr)
+{
+
+	struct rte_flow_error error;
+	const struct rte_flow_queue_attr *attr_list[nb_queue];
+	int std_queue;
+
+	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
+	    port_id == (uint16_t)RTE_PORT_ALL)
+		return -EINVAL;
+
+	for (std_queue = 0; std_queue < nb_queue; std_queue++)
+		attr_list[std_queue] = queue_attr;
+	/* Poisoning to make sure PMDs update it in case of error. */
+	memset(&error, 0x66, sizeof(error));
+	if (rte_flow_configure(port_id, port_attr, nb_queue, attr_list, &error))
+		return port_flow_complain(&error);
+	printf("Configure flows on port %u: "
+	       "number of queues %d with %d elements\n",
+	       port_id, nb_queue, queue_attr->size);
+	return 0;
+}
+
+#define NUM_QUEUES 1
+/** Get info about flow management resources. */
+int
+port_flow_get_info(uint16_t port_id)
+{
+    int err;
+	struct rte_flow_port_info port_info;
+	struct rte_flow_queue_info queue_info;
+	struct rte_flow_error error;
+    struct rte_eth_conf pconf;
+    struct rte_eth_dev_info dev_info;
+
+    memset(&dev_info, 0, sizeof(dev_info));
+    memset(&pconf, 0, sizeof(pconf));
+
+    err = rte_eth_dev_info_get(port_id, &dev_info);
+    if (err != 0)
+        return -err;
+
+    printf("\n\nDevice capabilities: 0x%"PRIx64"(", dev_info.dev_capa);
+    print_dev_capabilities(dev_info.dev_capa);
+    printf(" )\n");
+
+    if (dev_info.hash_key_size > 0)
+        printf("Hash key size in bytes: %u\n", dev_info.hash_key_size);
+    if (dev_info.reta_size > 0)
+        printf("Redirection table size: %u\n", dev_info.reta_size);
+    if (!dev_info.flow_type_rss_offloads)
+        printf("No RSS offload flow type is supported.\n");
+    else {
+        printf("Supported RSS offload flow types:\n");
+        rss_offload_types_display(dev_info.flow_type_rss_offloads,
+                RSS_TYPES_CHAR_NUM_PER_LINE);
+    }
+
+	/* Poisoning to make sure PMDs update it in case of error. */
+	memset(&error, 0x99, sizeof(error));
+	memset(&port_info, 0, sizeof(port_info));
+	memset(&queue_info, 0, sizeof(queue_info));
+    err = rte_flow_info_get(port_id, &port_info, &queue_info, &error) ;
+	if (err < 0)
+		return port_flow_complain(&error);
+	printf(":: Flow engine resources on port %u:\n"
+	       "Number of queues: %d\n"
+		   "Size of queues: %d\n"
+	       "Number of counters: %d\n"
+	       "Number of aging objects: %d\n"
+	       "Number of meter actions: %d\n",
+	       port_id, port_info.max_nb_queues,
+		   queue_info.max_size,
+	       port_info.max_nb_counters,
+	       port_info.max_nb_aging_objects,
+	       port_info.max_nb_meters);
+
+	return 0;
+}
+
+#define NUM_QUEUES 1
+/** Get info about flow management resources. */
+int
+port_flow_get_info_all(void)
+{
+    uint16_t port_id, nr_ports;
+    int err;
+    struct rte_eth_conf pconf;
+
+    nr_ports = rte_eth_dev_count_avail();
+    if (nr_ports == 0)
+        rte_exit(EXIT_FAILURE, "Error: no port detected\n");
+
+    for (port_id = 0; port_id < nr_ports; port_id++) {
+	    memset(&pconf, 0, sizeof(pconf));
+
+        if (port_id_is_invalid(port_id, ENABLED_WARN))
+		    return -1;
+
+        err = rte_eth_dev_configure(port_id, NUM_QUEUES,
+                NUM_QUEUES, &pconf);
+        if (err < 0)
+            rte_exit(EXIT_FAILURE,
+                ":: cannot configure device: err=%d, port=%u\n",
+                err, port_id);
+        err = port_flow_get_info(port_id);
+    	if (err < 0)
+            rte_exit(EXIT_FAILURE,
+                ":: cannot retrieve flow info "
+                "for (port %u): %s\n",
+                port_id, strerror(-err));
+    }
+
+	return 0;
 }
 
 int
