@@ -29,7 +29,12 @@ rte_strerror(int errnum)
 #endif
 #define RETVAL_SZ 256
 	static RTE_DEFINE_PER_LCORE(char[RETVAL_SZ], retval);
-	char *ret = RTE_PER_LCORE(retval);
+	char *ret = NULL;
+
+    if(RTE_PER_LCORE(retval))
+        ret = RTE_PER_LCORE(retval);
+    else
+        snprintf(ret, RETVAL_SZ, "Unknown error%s %d", sep, errnum);
 
 	/* since some implementations of strerror_r throw an error
 	 * themselves if errnum is too big, we handle that case here */

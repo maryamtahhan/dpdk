@@ -41,4 +41,22 @@ generate_flow(uint16_t port_id,
 	uint8_t max_priority,
 	struct rte_flow_error *error);
 
+void
+generate_flow_item(uint16_t port_id,
+	uint16_t group,
+    struct rte_flow_item *items,
+	uint64_t *flow_attrs,
+	uint64_t *flow_items,
+	uint64_t *flow_actions,
+	uint16_t next_table,
+	uint32_t outer_ip_src,
+	uint16_t hairpinq,
+	uint64_t encap_data,
+	uint64_t decap_data,
+	uint16_t dst_port,
+	uint8_t core_idx,
+	uint8_t rx_queues_count,
+	bool unique_data,
+	uint8_t max_priority);
+
 #endif /* FLOW_PERF_FLOW_GEN */

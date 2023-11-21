@@ -10,6 +10,7 @@ endif
 sources = files(
         'actions_gen.c',
         'flow_gen.c',
+        'flow_template.c',
         'items_gen.c',
         'main.c',
 )

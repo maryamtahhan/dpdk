@@ -74,3 +74,43 @@ generate_flow(uint16_t port_id,
 	flow = rte_flow_create(port_id, &attr, items, actions, error);
 	return flow;
 }
+
+
+void
+generate_flow_item(uint16_t port_id,
+	uint16_t group,
+    struct rte_flow_item *items,
+	uint64_t *flow_attrs,
+	uint64_t *flow_items,
+	uint64_t *flow_actions,
+	uint16_t next_table,
+	uint32_t outer_ip_src,
+	uint16_t hairpinq,
+	uint64_t encap_data,
+	uint64_t decap_data,
+	uint16_t dst_port,
+	uint8_t core_idx,
+	uint8_t rx_queues_count,
+	bool unique_data,
+	uint8_t max_priority)
+{
+	struct rte_flow_attr attr;
+	struct rte_flow_action actions[MAX_ACTIONS_NUM];
+	//struct rte_flow *flow = NULL;
+
+	memset(items, 0, sizeof(items));
+	memset(actions, 0, sizeof(actions));
+	memset(&attr, 0, sizeof(struct rte_flow_attr));
+
+	fill_attributes(&attr, flow_attrs, group, max_priority);
+
+	fill_actions(actions, flow_actions,
+		outer_ip_src, next_table, hairpinq,
+		encap_data, decap_data, core_idx,
+		unique_data, rx_queues_count, dst_port);
+
+	fill_items(items, flow_items, outer_ip_src, core_idx);
+
+	//flow = rte_flow_create(port_id, &attr, items, actions, error);
+	return;
+}

@@ -1,5 +1,74 @@
 #include "main.h"
 
+static struct multi_cores_pool mc_pool = {
+	.cores_count = 1,
+};
+
+static rss_type_info_t _rss_type_table[] = {
+	/* Group types */
+	{ "all", RTE_ETH_RSS_ETH | RTE_ETH_RSS_VLAN | RTE_ETH_RSS_IP | RTE_ETH_RSS_TCP |
+		RTE_ETH_RSS_UDP | RTE_ETH_RSS_SCTP | RTE_ETH_RSS_L2_PAYLOAD |
+		RTE_ETH_RSS_L2TPV3 | RTE_ETH_RSS_ESP | RTE_ETH_RSS_AH | RTE_ETH_RSS_PFCP |
+		RTE_ETH_RSS_GTPU | RTE_ETH_RSS_ECPRI | RTE_ETH_RSS_MPLS | RTE_ETH_RSS_L2TPV2},
+	{ "none", 0 },
+	{ "ip", RTE_ETH_RSS_IP },
+	{ "udp", RTE_ETH_RSS_UDP },
+	{ "tcp", RTE_ETH_RSS_TCP },
+	{ "sctp", RTE_ETH_RSS_SCTP },
+	{ "tunnel", RTE_ETH_RSS_TUNNEL },
+	{ "vlan", RTE_ETH_RSS_VLAN },
+
+	/* Individual type */
+	{ "ipv4", RTE_ETH_RSS_IPV4 },
+	{ "ipv4-frag", RTE_ETH_RSS_FRAG_IPV4 },
+	{ "ipv4-tcp", RTE_ETH_RSS_NONFRAG_IPV4_TCP },
+	{ "ipv4-udp", RTE_ETH_RSS_NONFRAG_IPV4_UDP },
+	{ "ipv4-sctp", RTE_ETH_RSS_NONFRAG_IPV4_SCTP },
+	{ "ipv4-other", RTE_ETH_RSS_NONFRAG_IPV4_OTHER },
+	{ "ipv6", RTE_ETH_RSS_IPV6 },
+	{ "ipv6-frag", RTE_ETH_RSS_FRAG_IPV6 },
+	{ "ipv6-tcp", RTE_ETH_RSS_NONFRAG_IPV6_TCP },
+	{ "ipv6-udp", RTE_ETH_RSS_NONFRAG_IPV6_UDP },
+	{ "ipv6-sctp", RTE_ETH_RSS_NONFRAG_IPV6_SCTP },
+	{ "ipv6-other", RTE_ETH_RSS_NONFRAG_IPV6_OTHER },
+	{ "l2-payload", RTE_ETH_RSS_L2_PAYLOAD },
+	{ "ipv6-ex", RTE_ETH_RSS_IPV6_EX },
+	{ "ipv6-tcp-ex", RTE_ETH_RSS_IPV6_TCP_EX },
+	{ "ipv6-udp-ex", RTE_ETH_RSS_IPV6_UDP_EX },
+	{ "port", RTE_ETH_RSS_PORT },
+	{ "vxlan", RTE_ETH_RSS_VXLAN },
+	{ "geneve", RTE_ETH_RSS_GENEVE },
+	{ "nvgre", RTE_ETH_RSS_NVGRE },
+	{ "gtpu", RTE_ETH_RSS_GTPU },
+	{ "eth", RTE_ETH_RSS_ETH },
+	{ "s-vlan", RTE_ETH_RSS_S_VLAN },
+	{ "c-vlan", RTE_ETH_RSS_C_VLAN },
+	{ "esp", RTE_ETH_RSS_ESP },
+	{ "ah", RTE_ETH_RSS_AH },
+	{ "l2tpv3", RTE_ETH_RSS_L2TPV3 },
+	{ "pfcp", RTE_ETH_RSS_PFCP },
+	{ "pppoe", RTE_ETH_RSS_PPPOE },
+	{ "ecpri", RTE_ETH_RSS_ECPRI },
+	{ "mpls", RTE_ETH_RSS_MPLS },
+	{ "ipv4-chksum", RTE_ETH_RSS_IPV4_CHKSUM },
+	{ "l4-chksum", RTE_ETH_RSS_L4_CHKSUM },
+	{ "l2tpv2", RTE_ETH_RSS_L2TPV2 },
+	{ "l3-pre96", RTE_ETH_RSS_L3_PRE96 },
+	{ "l3-pre64", RTE_ETH_RSS_L3_PRE64 },
+	{ "l3-pre56", RTE_ETH_RSS_L3_PRE56 },
+	{ "l3-pre48", RTE_ETH_RSS_L3_PRE48 },
+	{ "l3-pre40", RTE_ETH_RSS_L3_PRE40 },
+	{ "l3-pre32", RTE_ETH_RSS_L3_PRE32 },
+	{ "l2-dst-only", RTE_ETH_RSS_L2_DST_ONLY },
+	{ "l2-src-only", RTE_ETH_RSS_L2_SRC_ONLY },
+	{ "l4-dst-only", RTE_ETH_RSS_L4_DST_ONLY },
+	{ "l4-src-only", RTE_ETH_RSS_L4_SRC_ONLY },
+	{ "l3-dst-only", RTE_ETH_RSS_L3_DST_ONLY },
+	{ "l3-src-only", RTE_ETH_RSS_L3_SRC_ONLY },
+	{ NULL, 0},
+};
+
+
 static void
 usage(char *progname)
 {
@@ -178,6 +247,7 @@ args_parse(int argc, char **argv)
         /* Control */
         { "help",                       0, 0, 0 },
         { "port-info",                  0, 0, 0 },
+        { "template",                   0, 0, 0 },
         { "rules-count",                1, 0, 0 },
         { "rules-batch",                1, 0, 0 },
         { "dump-iterations",            0, 0, 0 },
@@ -201,6 +271,7 @@ args_parse(int argc, char **argv)
         { "ingress",                    0, 0, 0 },
         { "egress",                     0, 0, 0 },
         { "transfer",                   0, 0, 0 },
+       // { "relaxed",                   0, 0, 0 }, // MT_TODO
         { "group",                      1, 0, 0 },
         /* Items */
         { "ether",                      0, 0, 0 },
@@ -279,6 +350,10 @@ args_parse(int argc, char **argv)
             if (strcmp(lgopts[opt_idx].name, "port-info") == 0) {
                 port_flow_get_info_all();
                 exit(EXIT_SUCCESS);
+            }
+
+            if (strcmp(lgopts[opt_idx].name, "template") == 0) {
+                use_template = 1;
             }
 
             if (strcmp(lgopts[opt_idx].name, "group") == 0) {
@@ -904,6 +979,154 @@ destroy_flows(int port_id, uint8_t core_id, struct rte_flow **flows_list)
     mc_pool.flows_record.deletion[port_id][core_id] = cpu_time_used;
 }
 
+static struct rte_flow_item **
+insert_flow_templates(int port_id, uint8_t core_id, uint16_t dst_port_id)
+{
+    struct rte_flow_item **flow_items_list;
+    //struct rte_flow_error error;
+    clock_t start_batch, end_batch;
+    double first_flow_latency;
+    double cpu_time_used;
+    double insertion_rate;
+    double cpu_time_per_batch[MAX_BATCHES_COUNT] = { 0 };
+    double delta;
+    uint32_t flow_index;
+    uint32_t counter, start_counter = 0, end_counter;
+    uint64_t global_items[MAX_ITEMS_NUM] = { 0 };
+    uint64_t global_actions[MAX_ACTIONS_NUM] = { 0 };
+    int rules_batch_idx;
+    int rules_count_per_core;
+    struct rte_flow_item items[MAX_ITEMS_NUM];
+
+    rules_count_per_core = rules_count / mc_pool.cores_count;
+
+    /* Set boundaries of rules for each core. */
+    if (core_id)
+        start_counter = core_id * rules_count_per_core;
+    end_counter = (core_id + 1) * rules_count_per_core;
+
+    global_items[0] = FLOW_ITEM_MASK(RTE_FLOW_ITEM_TYPE_ETH);
+    global_actions[0] = FLOW_ITEM_MASK(RTE_FLOW_ACTION_TYPE_JUMP);
+
+    flow_items_list = rte_zmalloc("flow_items_list",
+        (sizeof(struct rte_flow_item *) * rules_count_per_core) + 1, 0);
+    if (flow_items_list == NULL)
+        rte_exit(EXIT_FAILURE, "No Memory available!\n");
+
+    cpu_time_used = 0;
+    flow_index = 0;
+    // if (flow_group > 0 && core_id == 0) {
+    //     // MT_TODO CREATE FLOW ITEM
+    //     /*
+    //      * Create global rule to jump into flow_group,
+    //      * this way the app will avoid the default rules.
+    //      *
+    //      * This rule will be created only once.
+    //      *
+    //      * Global rule:
+    //      * group 0 eth / end actions jump group <flow_group>
+    //      */
+        // flow_template_items
+        generate_flow_item(port_id, 0, items, flow_attrs,
+            global_items, global_actions,
+            flow_group, 0, 0, 0, 0, dst_port_id, core_id,
+            rx_queues_count, unique_data, max_priority);
+
+        struct rte_flow_pattern_template_attr attr;
+        struct port_template port_templ;
+
+        attr.ingress = 1;
+
+        if(port_flow_pattern_template_create(port_id, UINT32_MAX, &attr, items, &port_templ) != 0){
+            rte_exit(EXIT_FAILURE, "Error in creating flow template pattern\n");
+        }
+
+        // flow = generate_flow(port_id, 0, flow_attrs,
+        //     global_items, global_actions,
+        //     flow_group, 0, 0, 0, 0, dst_port_id, core_id,
+        //     rx_queues_count, unique_data, max_priority, &error);
+
+        // if (flow == NULL) {
+        //     print_flow_error(error);
+        //     rte_exit(EXIT_FAILURE, "Error in creating flow\n");
+        // }
+        flow_items_list[flow_index++] = flow_template_item;
+   // }
+
+    if (rte_eth_dev_start(port_id)< 0)
+        rte_exit(EXIT_FAILURE,
+            "rte_eth_dev_start:error, port=%u\n", port_id);
+
+    start_batch = rte_get_timer_cycles();
+    for (counter = start_counter; counter < end_counter; counter++) {
+        //MT_TODO INSERT FLOW ITEM
+        // flow = generate_flow(port_id, flow_group,
+        //     flow_attrs, flow_items, flow_actions,
+        //     JUMP_ACTION_TABLE, counter,
+        //     hairpin_queues_num, encap_data,
+        //     decap_data, dst_port_id,
+        //     core_id, rx_queues_count,
+        //     unique_data, max_priority, &error);
+
+        if (!counter) {
+            first_flow_latency = (double) (rte_get_timer_cycles() - start_batch);
+            first_flow_latency /= rte_get_timer_hz();
+            /* In millisecond */
+            first_flow_latency *= 1000;
+            printf(":: First Flow Latency :: Port %d :: First flow "
+                "installed in %f milliseconds\n",
+                port_id, first_flow_latency);
+        }
+
+        if (force_quit)
+            counter = end_counter;
+
+        if (!flow) {
+           // print_flow_error(error);
+            if (counter == 0)
+                rte_exit(EXIT_FAILURE, "Error in creating n flows\n");
+
+            printf("Error in creating flow maxed out at %d\n", counter);
+            rules_count = counter;
+            return flow_items_list;
+        }
+
+        //flow_items_list[flow_index++] = flow_template_item;
+
+        /*
+         * Save the insertion rate for rules batch.
+         * Check if the insertion reached the rules
+         * patch counter, then save the insertion rate
+         * for this batch.
+         */
+        if (!((counter + 1) % rules_batch)) {
+            end_batch = rte_get_timer_cycles();
+            delta = (double) (end_batch - start_batch);
+            rules_batch_idx = ((counter + 1) / rules_batch) - 1;
+            cpu_time_per_batch[rules_batch_idx] = delta / rte_get_timer_hz();
+            cpu_time_used += cpu_time_per_batch[rules_batch_idx];
+            start_batch = rte_get_timer_cycles();
+        }
+    }
+
+    /* Print insertion rates for all batches */
+    if (dump_iterations)
+        print_rules_batches(cpu_time_per_batch);
+
+    printf(":: Port %d :: Core %d boundaries :: start @[%d] - end @[%d]\n",
+        port_id, core_id, start_counter, end_counter - 1);
+
+    /* Insertion rate for all rules in one core */
+    insertion_rate = ((double) (rules_count_per_core / cpu_time_used) / 1000);
+    printf(":: Port %d :: Core %d :: Rules insertion rate -> %f K Rule/Sec\n",
+        port_id, core_id, insertion_rate);
+    printf(":: Port %d :: Core %d :: The time for creating %d in rules %f seconds\n",
+        port_id, core_id, rules_count_per_core, cpu_time_used);
+
+    mc_pool.flows_record.insertion[port_id][core_id] = cpu_time_used;
+    return flow_items_list;
+}
+
 static struct rte_flow **
 insert_flows(int port_id, uint8_t core_id, uint16_t dst_port_id)
 {
@@ -1028,6 +1251,59 @@ insert_flows(int port_id, uint8_t core_id, uint16_t dst_port_id)
 
     mc_pool.flows_record.insertion[port_id][core_id] = cpu_time_used;
     return flows_list;
+}
+
+static void
+flows_template_handler(uint8_t core_id)
+{
+    struct rte_flow_item **flow_items_list;
+    uint16_t port_idx = 0;
+    uint16_t nr_ports;
+    int port_id;
+
+    nr_ports = rte_eth_dev_count_avail();
+
+    if (rules_batch > rules_count)
+        rules_batch = rules_count;
+
+    printf(":: Rules Count per port: %d\n\n", rules_count);
+
+    for (port_id = 0; port_id < nr_ports; port_id++) {
+        int ret = -1;
+        struct rte_flow_port_attr attr = {0};
+        struct rte_flow_queue_attr qattr = {0};
+        /* If port outside portmask */
+        if (!((ports_mask >> port_id) & 0x1))
+            continue;
+
+        /* Insertion part. */
+        mc_pool.last_alloc[core_id] = (int64_t)dump_socket_mem(stdout);
+        if (has_meter())
+            meters_handler(port_id, core_id, METER_CREATE);
+
+        qattr.size = rules_batch;
+
+        ret = port_flow_configure(port_id, &attr, 1, &qattr);
+        if (ret != 0) {
+            rte_exit(EXIT_FAILURE, "Error in port_flow_configure\n");
+        }
+
+        flow_items_list = insert_flow_templates(port_id, core_id,
+                        dst_ports[port_idx]);
+        if (flow_items_list == NULL) {
+            rte_exit(EXIT_FAILURE, "Error in inserting flow templates\n");
+        }
+
+        port_idx++;
+        mc_pool.current_alloc[core_id] = (int64_t)dump_socket_mem(stdout);
+
+        /* Deletion part. */
+        if (delete_flag) {
+        //    destroy_flows(port_id, core_id, flows_list);
+            if (has_meter())
+                meters_handler(port_id, core_id, METER_DELETE);
+        }
+    }
 }
 
 static void
@@ -1252,7 +1528,10 @@ run_rte_flow_handler_cores(void *data __rte_unused)
 
     mc_pool.rules_count = rules_count;
 
-    flows_handler(lcore_id);
+    if (!use_template)
+        flows_handler(lcore_id);
+    else
+        flows_template_handler(lcore_id);
 
     /* Only main core to print total results. */
     if (lcore_id != 0)
@@ -1514,16 +1793,15 @@ rsstypes_to_str(uint64_t rss_type)
 {
     uint16_t i;
 
-    for (i = 0; rss_type_table[i].str != NULL; i++) {
-        if (rss_type_table[i].rss_type == rss_type)
-            return rss_type_table[i].str;
+    for (i = 0; _rss_type_table[i].str != NULL; i++) {
+        if (_rss_type_table[i].rss_type == rss_type)
+            return _rss_type_table[i].str;
     }
 
     return NULL;
 }
 
-
-static void
+void
 rss_offload_types_display(uint64_t offload_types, uint16_t char_num_per_line)
 {
     uint16_t user_defined_str_len;
@@ -1556,7 +1834,7 @@ rss_offload_types_display(uint64_t offload_types, uint16_t char_num_per_line)
     printf("\n");
 }
 
-static void
+void
 print_dev_capabilities(uint64_t capabilities)
 {
     uint64_t single_capa;
@@ -1603,7 +1881,7 @@ print_rx_offloads(uint64_t offloads)
 }
 
 /** Print a message out of a flow error. */
-static int
+int
 port_flow_complain(struct rte_flow_error *error)
 {
     static const char *const errstrlist[] = {
@@ -1666,7 +1944,7 @@ port_flow_complain(struct rte_flow_error *error)
  */
 uint64_t rss_hf = GET_RSS_HF(); /* RSS IP by default. */
 
-static void
+void
 init_port(void)
 {
     int ret;
@@ -1807,28 +2085,6 @@ init_port(void)
                 ":: cannot configure device: err=%d, port=%u\n",
                 ret, port_id);
 
-        // memset(&error, 0x99, sizeof(error));
-    	// memset(&port_info, 0, sizeof(port_info));
-    	// memset(&queue_info, 0, sizeof(queue_info));
-        // if (rte_flow_info_get(port_id, &port_info, &queue_info, &error) != 0) { // MT probably only supported on MLNX
-        //     printf(":: Error getting flow info for port: %d, skipping for now\n", port_id);
-        //     port_flow_complain(&error);
-        // } else {
-        //     printf("\n\nFlow capabilities: \n");
-        //     printf("Flow engine resources on port %u:\n"
-        //        "Number of queues: %d\n"
-        //        "Size of queues: %d\n"
-        //        "Number of counters: %d\n"
-        //        "Number of aging objects: %d\n"
-        //        "Number of meter actions: %d\n",
-        //        port_id, port_info.max_nb_queues,
-        //        queue_info.max_size,
-        //        port_info.max_nb_counters,
-        //        port_info.max_nb_aging_objects,
-        //        port_info.max_nb_meters);
-        // }
-
-
         rxq_conf = dev_info.default_rxconf;
         for (std_queue = 0; std_queue < rx_queues_count; std_queue++) {
             ret = rte_eth_rx_queue_setup(port_id, std_queue, rxd_count,
@@ -1908,17 +2164,19 @@ init_port(void)
             }
         }
 
-        ret = rte_eth_dev_start(port_id);
-        if (ret < 0)
-            rte_exit(EXIT_FAILURE,
-                "rte_eth_dev_start:err=%d, port=%u\n",
-                ret, port_id);
+        if (!use_template) {
+            ret = rte_eth_dev_start(port_id);
+            if (ret < 0)
+                rte_exit(EXIT_FAILURE,
+                    "rte_eth_dev_start:err=%d, port=%u\n",
+                    ret, port_id);
+        }
 
         printf(":: initializing port: %d done\n", port_id);
     }
 }
 
-static int
+int
 port_id_is_invalid(uint16_t port_id, enum print_warning warning)
 {
 	uint16_t pid;
@@ -1961,99 +2219,6 @@ port_flow_configure(uint16_t port_id,
 	printf("Configure flows on port %u: "
 	       "number of queues %d with %d elements\n",
 	       port_id, nb_queue, queue_attr->size);
-	return 0;
-}
-
-#define NUM_QUEUES 1
-/** Get info about flow management resources. */
-int
-port_flow_get_info(uint16_t port_id)
-{
-    int err;
-	struct rte_flow_port_info port_info;
-	struct rte_flow_queue_info queue_info;
-	struct rte_flow_error error;
-    struct rte_eth_conf pconf;
-    struct rte_eth_dev_info dev_info;
-
-    memset(&dev_info, 0, sizeof(dev_info));
-    memset(&pconf, 0, sizeof(pconf));
-
-    err = rte_eth_dev_info_get(port_id, &dev_info);
-    if (err != 0)
-        return -err;
-
-    printf("\n\nDevice capabilities: 0x%"PRIx64"(", dev_info.dev_capa);
-    print_dev_capabilities(dev_info.dev_capa);
-    printf(" )\n");
-
-    if (dev_info.hash_key_size > 0)
-        printf("Hash key size in bytes: %u\n", dev_info.hash_key_size);
-    if (dev_info.reta_size > 0)
-        printf("Redirection table size: %u\n", dev_info.reta_size);
-    if (!dev_info.flow_type_rss_offloads)
-        printf("No RSS offload flow type is supported.\n");
-    else {
-        printf("Supported RSS offload flow types:\n");
-        rss_offload_types_display(dev_info.flow_type_rss_offloads,
-                RSS_TYPES_CHAR_NUM_PER_LINE);
-    }
-
-	/* Poisoning to make sure PMDs update it in case of error. */
-	memset(&error, 0x99, sizeof(error));
-	memset(&port_info, 0, sizeof(port_info));
-	memset(&queue_info, 0, sizeof(queue_info));
-    err = rte_flow_info_get(port_id, &port_info, &queue_info, &error) ;
-	if (err < 0)
-		return port_flow_complain(&error);
-	printf(":: Flow engine resources on port %u:\n"
-	       "Number of queues: %d\n"
-		   "Size of queues: %d\n"
-	       "Number of counters: %d\n"
-	       "Number of aging objects: %d\n"
-	       "Number of meter actions: %d\n",
-	       port_id, port_info.max_nb_queues,
-		   queue_info.max_size,
-	       port_info.max_nb_counters,
-	       port_info.max_nb_aging_objects,
-	       port_info.max_nb_meters);
-
-	return 0;
-}
-
-#define NUM_QUEUES 1
-/** Get info about flow management resources. */
-int
-port_flow_get_info_all(void)
-{
-    uint16_t port_id, nr_ports;
-    int err;
-    struct rte_eth_conf pconf;
-
-    nr_ports = rte_eth_dev_count_avail();
-    if (nr_ports == 0)
-        rte_exit(EXIT_FAILURE, "Error: no port detected\n");
-
-    for (port_id = 0; port_id < nr_ports; port_id++) {
-	    memset(&pconf, 0, sizeof(pconf));
-
-        if (port_id_is_invalid(port_id, ENABLED_WARN))
-		    return -1;
-
-        err = rte_eth_dev_configure(port_id, NUM_QUEUES,
-                NUM_QUEUES, &pconf);
-        if (err < 0)
-            rte_exit(EXIT_FAILURE,
-                ":: cannot configure device: err=%d, port=%u\n",
-                err, port_id);
-        err = port_flow_get_info(port_id);
-    	if (err < 0)
-            rte_exit(EXIT_FAILURE,
-                ":: cannot retrieve flow info "
-                "for (port %u): %s\n",
-                port_id, strerror(-err));
-    }
-
 	return 0;
 }
 
@@ -2111,6 +2276,7 @@ main(int argc, char **argv)
         if (policy_mtr)
             create_meter_policy();
     }
+
     rte_eal_mp_remote_launch(run_rte_flow_handler_cores, NULL, CALL_MAIN);
 
     if (enable_fwd) {

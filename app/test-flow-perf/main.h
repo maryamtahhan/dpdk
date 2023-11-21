@@ -56,48 +56,50 @@
 #define HAIRPIN_TX_CONF_RTE_MEMORY    (0x0200)
 
 struct rte_flow *flow;
-static uint8_t flow_group;
+struct rte_flow_item *flow_template_item;
+uint8_t flow_group;
 
-static uint64_t encap_data;
-static uint64_t decap_data;
-static uint64_t all_actions[RTE_COLORS][MAX_ACTIONS_NUM];
-static char *actions_str[RTE_COLORS];
+uint64_t encap_data;
+uint64_t decap_data;
+uint64_t all_actions[RTE_COLORS][MAX_ACTIONS_NUM];
+char *actions_str[RTE_COLORS];
 
-static uint64_t flow_items[MAX_ITEMS_NUM];
-static uint64_t flow_actions[MAX_ACTIONS_NUM];
-static uint64_t flow_attrs[MAX_ATTRS_NUM];
-static uint32_t policy_id[MAX_PORTS];
-static uint8_t items_idx, actions_idx, attrs_idx;
+uint64_t flow_items[MAX_ITEMS_NUM];
+uint64_t flow_actions[MAX_ACTIONS_NUM];
+uint64_t flow_attrs[MAX_ATTRS_NUM];
+uint32_t policy_id[MAX_PORTS];
+uint8_t items_idx, actions_idx, attrs_idx;
 
-static uint64_t ports_mask;
-static uint64_t hairpin_conf_mask;
-static uint16_t dst_ports[RTE_MAX_ETHPORTS];
-static volatile bool force_quit;
-static bool dump_iterations;
-static bool delete_flag;
-static bool dump_socket_mem_flag;
-static bool enable_fwd;
-static bool unique_data;
-static bool policy_mtr;
-static bool packet_mode;
+uint64_t ports_mask;
+uint64_t hairpin_conf_mask;
+uint16_t dst_ports[RTE_MAX_ETHPORTS];
+volatile bool force_quit;
+bool dump_iterations;
+bool delete_flag;
+bool dump_socket_mem_flag;
+bool enable_fwd;
+bool unique_data;
+bool policy_mtr;
+bool packet_mode;
 
-static uint8_t rx_queues_count;
-static uint8_t tx_queues_count;
-static uint8_t rxd_count;
-static uint8_t txd_count;
-static uint32_t mbuf_size;
-static uint32_t mbuf_cache_size;
-static uint32_t total_mbuf_num;
+uint8_t rx_queues_count;
+uint8_t tx_queues_count;
+uint8_t rxd_count;
+uint8_t txd_count;
+uint32_t mbuf_size;
+uint32_t mbuf_cache_size;
+uint32_t total_mbuf_num;
 
-static struct rte_mempool *mbuf_mp;
-static uint32_t nb_lcores;
-static uint32_t rules_count;
-static uint32_t rules_batch;
-static uint32_t hairpin_queues_num; /* total hairpin q number - default: 0 */
-static uint32_t nb_lcores;
-static uint8_t max_priority;
-static uint32_t rand_seed;
-static uint64_t meter_profile_values[3]; /* CIR CBS EBS values. */
+struct rte_mempool *mbuf_mp;
+uint32_t nb_lcores;
+uint32_t rules_count;
+uint32_t rules_batch;
+uint32_t hairpin_queues_num; /* total hairpin q number - default: 0 */
+uint32_t use_template;
+uint32_t nb_lcores;
+uint8_t max_priority;
+uint32_t rand_seed;
+uint64_t meter_profile_values[3]; /* CIR CBS EBS values. */
 
 #define MAX_PKT_BURST    32
 #define LCORE_MODE_PKT    1
@@ -124,7 +126,7 @@ struct lcore_info {
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
 } __rte_cache_aligned;
 
-static struct lcore_info lcore_infos[RTE_MAX_LCORE];
+struct lcore_info lcore_infos[RTE_MAX_LCORE];
 
 struct used_cpu_time {
 	double insertion[MAX_PORTS][RTE_MAX_LCORE];
@@ -139,10 +141,6 @@ struct multi_cores_pool {
 	int64_t last_alloc[RTE_MAX_LCORE];
 	int64_t current_alloc[RTE_MAX_LCORE];
 } __rte_cache_aligned;
-
-static struct multi_cores_pool mc_pool = {
-	.cores_count = 1,
-};
 
 static const struct option_dict {
 	const char *str;
@@ -477,76 +475,34 @@ static const struct option_dict {
 
 const char *rsstypes_to_str(uint64_t rss_type);
 
-
 /** Information for a given RSS type. */
 typedef struct rss_type_info {
 	const char *str; /**< Type name. */
 	uint64_t rss_type; /**< Type value. */
 } rss_type_info_t;
 
-rss_type_info_t rss_type_table[] = {
-	/* Group types */
-	{ "all", RTE_ETH_RSS_ETH | RTE_ETH_RSS_VLAN | RTE_ETH_RSS_IP | RTE_ETH_RSS_TCP |
-		RTE_ETH_RSS_UDP | RTE_ETH_RSS_SCTP | RTE_ETH_RSS_L2_PAYLOAD |
-		RTE_ETH_RSS_L2TPV3 | RTE_ETH_RSS_ESP | RTE_ETH_RSS_AH | RTE_ETH_RSS_PFCP |
-		RTE_ETH_RSS_GTPU | RTE_ETH_RSS_ECPRI | RTE_ETH_RSS_MPLS | RTE_ETH_RSS_L2TPV2},
-	{ "none", 0 },
-	{ "ip", RTE_ETH_RSS_IP },
-	{ "udp", RTE_ETH_RSS_UDP },
-	{ "tcp", RTE_ETH_RSS_TCP },
-	{ "sctp", RTE_ETH_RSS_SCTP },
-	{ "tunnel", RTE_ETH_RSS_TUNNEL },
-	{ "vlan", RTE_ETH_RSS_VLAN },
+// /** Descriptor for a flow table. */
+// struct port_table {
+// 	struct port_table *next; /**< Next table in list. */
+// 	struct port_table *tmp; /**< Temporary linking. */
+// 	uint32_t id; /**< Table ID. */
+// 	uint32_t nb_pattern_templates; /**< Number of pattern templates. */
+// 	uint32_t nb_actions_templates; /**< Number of actions templates. */
+// 	struct rte_flow_attr flow_attr; /**< Flow attributes. */
+// 	struct rte_flow_template_table *table; /**< PMD opaque template object */
+// };
 
-	/* Individual type */
-	{ "ipv4", RTE_ETH_RSS_IPV4 },
-	{ "ipv4-frag", RTE_ETH_RSS_FRAG_IPV4 },
-	{ "ipv4-tcp", RTE_ETH_RSS_NONFRAG_IPV4_TCP },
-	{ "ipv4-udp", RTE_ETH_RSS_NONFRAG_IPV4_UDP },
-	{ "ipv4-sctp", RTE_ETH_RSS_NONFRAG_IPV4_SCTP },
-	{ "ipv4-other", RTE_ETH_RSS_NONFRAG_IPV4_OTHER },
-	{ "ipv6", RTE_ETH_RSS_IPV6 },
-	{ "ipv6-frag", RTE_ETH_RSS_FRAG_IPV6 },
-	{ "ipv6-tcp", RTE_ETH_RSS_NONFRAG_IPV6_TCP },
-	{ "ipv6-udp", RTE_ETH_RSS_NONFRAG_IPV6_UDP },
-	{ "ipv6-sctp", RTE_ETH_RSS_NONFRAG_IPV6_SCTP },
-	{ "ipv6-other", RTE_ETH_RSS_NONFRAG_IPV6_OTHER },
-	{ "l2-payload", RTE_ETH_RSS_L2_PAYLOAD },
-	{ "ipv6-ex", RTE_ETH_RSS_IPV6_EX },
-	{ "ipv6-tcp-ex", RTE_ETH_RSS_IPV6_TCP_EX },
-	{ "ipv6-udp-ex", RTE_ETH_RSS_IPV6_UDP_EX },
-	{ "port", RTE_ETH_RSS_PORT },
-	{ "vxlan", RTE_ETH_RSS_VXLAN },
-	{ "geneve", RTE_ETH_RSS_GENEVE },
-	{ "nvgre", RTE_ETH_RSS_NVGRE },
-	{ "gtpu", RTE_ETH_RSS_GTPU },
-	{ "eth", RTE_ETH_RSS_ETH },
-	{ "s-vlan", RTE_ETH_RSS_S_VLAN },
-	{ "c-vlan", RTE_ETH_RSS_C_VLAN },
-	{ "esp", RTE_ETH_RSS_ESP },
-	{ "ah", RTE_ETH_RSS_AH },
-	{ "l2tpv3", RTE_ETH_RSS_L2TPV3 },
-	{ "pfcp", RTE_ETH_RSS_PFCP },
-	{ "pppoe", RTE_ETH_RSS_PPPOE },
-	{ "ecpri", RTE_ETH_RSS_ECPRI },
-	{ "mpls", RTE_ETH_RSS_MPLS },
-	{ "ipv4-chksum", RTE_ETH_RSS_IPV4_CHKSUM },
-	{ "l4-chksum", RTE_ETH_RSS_L4_CHKSUM },
-	{ "l2tpv2", RTE_ETH_RSS_L2TPV2 },
-	{ "l3-pre96", RTE_ETH_RSS_L3_PRE96 },
-	{ "l3-pre64", RTE_ETH_RSS_L3_PRE64 },
-	{ "l3-pre56", RTE_ETH_RSS_L3_PRE56 },
-	{ "l3-pre48", RTE_ETH_RSS_L3_PRE48 },
-	{ "l3-pre40", RTE_ETH_RSS_L3_PRE40 },
-	{ "l3-pre32", RTE_ETH_RSS_L3_PRE32 },
-	{ "l2-dst-only", RTE_ETH_RSS_L2_DST_ONLY },
-	{ "l2-src-only", RTE_ETH_RSS_L2_SRC_ONLY },
-	{ "l4-dst-only", RTE_ETH_RSS_L4_DST_ONLY },
-	{ "l4-src-only", RTE_ETH_RSS_L4_SRC_ONLY },
-	{ "l3-dst-only", RTE_ETH_RSS_L3_DST_ONLY },
-	{ "l3-src-only", RTE_ETH_RSS_L3_SRC_ONLY },
-	{ NULL, 0},
+/** Descriptor for a template. */
+struct port_template {
+	struct port_template *next; /**< Next template in list. */
+	struct port_template *tmp; /**< Temporary linking. */
+	uint32_t id; /**< Template ID. */
+	union {
+		struct rte_flow_pattern_template *pattern_template;
+		struct rte_flow_actions_template *actions_template;
+	} template; /**< PMD opaque template object */
 };
+
 
 enum print_warning {
 	ENABLED_WARN = 0,
@@ -555,6 +511,7 @@ enum print_warning {
 
 #define RTE_PORT_ALL            (~(uint16_t)0x0)
 
+void init_port(void) ;
 int port_flow_get_info(uint16_t port_id);
 int port_flow_get_info_all(void);
 int
@@ -562,3 +519,37 @@ port_flow_configure(uint16_t port_id,
 	const struct rte_flow_port_attr *port_attr,
 	uint16_t nb_queue,
 	const struct rte_flow_queue_attr *queue_attr);
+
+int port_id_is_invalid(uint16_t port_id, enum print_warning warning);
+void print_dev_capabilities(uint64_t capabilities);
+void rss_offload_types_display(uint64_t offload_types,
+                      uint16_t char_num_per_line);
+int port_flow_complain(struct rte_flow_error *error);
+int port_flow_pattern_template_create(uint16_t port_id, uint32_t id,
+				      const struct rte_flow_pattern_template_attr *attr,
+				      const struct rte_flow_item *pattern,
+                      struct port_template *pattern_templ_list);
+int
+port_flow_pattern_template_destroy(uint16_t port_id, uint32_t n,
+				   const uint32_t *template,
+                   struct port_template *pattern_templ_list);
+int
+port_flow_pattern_template_flush(uint16_t port_id,
+                                 struct port_template *pattern_templ_list);
+#if 0
+int port_flow_actions_template_create(uint16_t port_id, uint32_t id,
+				      const struct rte_flow_actions_template_attr *attr,
+				      const struct rte_flow_action *actions,
+				      const struct rte_flow_action *masks,
+                      struct port_template *actions_templ_list);
+int port_flow_actions_template_destroy(uint16_t port_id, uint32_t n,
+				       const uint32_t *template);
+int port_flow_actions_template_flush(uint16_t port_id);
+int port_flow_template_table_create(uint16_t port_id, uint32_t id,
+		   const struct rte_flow_template_table_attr *table_attr,
+		   uint32_t nb_pattern_templates, uint32_t *pattern_templates,
+		   uint32_t nb_actions_templates, uint32_t *actions_templates);
+int port_flow_template_table_destroy(uint16_t port_id,
+			    uint32_t n, const uint32_t *table);
+int port_flow_template_table_flush(uint16_t port_id);
+#endif
