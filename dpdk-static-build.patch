@@ -1,0 +1,12 @@
+diff --git a/meson.build b/meson.build
+index f91d652bc5..e213dc04e8 100644
+--- a/meson.build
++++ b/meson.build
+@@ -11,6 +11,7 @@ project('DPDK', 'C',
+             'buildtype=release',
+             'default_library=static',
+             'warning_level=2',
++            'b_staticpic=true',
+         ],
+         meson_version: '>= 0.53.2'
+ )
