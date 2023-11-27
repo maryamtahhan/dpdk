@@ -38,9 +38,10 @@ The XSKMAP is a BPF map of AF_XDP sockets (XSK).
 The client can then proceed with creating an AF_XDP socket
 and inserting that socket into the XSKMAP pointed to by the descriptor.
 
-The EAL vdev argument ``use_cni`` is used to indicate that the user wishes
+The EAL vdev arguments ``use_cni`` and ``sock`` are used to indicate that the user wishes
 to run the PMD in unprivileged mode and to receive the XSKMAP file descriptor
 from the CNI.
+
 When this flag is set,
 the ``XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD`` libbpf flag
 should be used when creating the socket
@@ -49,7 +50,7 @@ Instead the loading is handled by the CNI.
 
 .. note::
 
-   The Unix Domain Socket file path appear in the end user is "/tmp/afxdp.sock".
+   The Unix Domain Socket file path appears to the end user at "/tmp/afxdp_dp/<netdev>/afxdp.sock".
 
 
 Prerequisites
@@ -224,7 +225,6 @@ Howto run dpdk-testpmd with CNI plugin:
           capabilities:
              add:
                - CAP_NET_RAW
-               - CAP_BPF
          resources:
            requests:
              hugepages-2Mi: 2Gi
@@ -245,7 +245,17 @@ Howto run dpdk-testpmd with CNI plugin:
 
      kubectl exec -i <Pod name> --container <containers name> -- \
            /<Path>/dpdk-testpmd -l 0,1 --no-pci \
-           --vdev=net_af_xdp0,use_cni=1,iface=<interface name> \
+           --vdev=net_af_xdp0,use_cni=1,iface=<interface name>,sock=/tmp/afxdp_dp/<interface name>/afxdp.sock \
+           -- --no-mlockall --in-memory
+
+for multiple devices use:
+
+  .. code-block:: console
+
+     kubectl exec -i <Pod name> --container <containers name> -- \
+           /<Path>/dpdk-testpmd -l 0-2 --no-pci \
+           --vdev=net_af_xdp0,use_cni=1,iface=<interface name>,sock=/tmp/afxdp_dp/<interface name>/afxdp.sock \
+           --vdev=net_af_xdp1,use_cni=1,iface=<interface name>,sock=/tmp/afxdp_dp/<interface name>/afxdp.sock \
            -- --no-mlockall --in-memory
 
 For further reference please use the `e2e`_ test case in `AF_XDP Plugin for Kubernetes`_

@@ -88,7 +88,6 @@ RTE_LOG_REGISTER_DEFAULT(af_xdp_logtype, NOTICE);
 #define UDS_MAX_CMD_LEN			64
 #define UDS_MAX_CMD_RESP		128
 #define UDS_XSK_MAP_FD_MSG		"/xsk_map_fd"
-#define UDS_SOCK			"/tmp/afxdp.sock"
 #define UDS_CONNECT_MSG			"/connect"
 #define UDS_HOST_OK_MSG			"/host_ok"
 #define UDS_HOST_NAK_MSG		"/host_nak"
@@ -171,6 +170,7 @@ struct pmd_internals {
 	bool custom_prog_configured;
 	bool force_copy;
 	bool use_cni;
+	char sock_path[PATH_MAX];
 	struct bpf_map *map;
 
 	struct rte_ether_addr eth_addr;
@@ -191,6 +191,7 @@ struct pmd_process_private {
 #define ETH_AF_XDP_BUDGET_ARG			"busy_budget"
 #define ETH_AF_XDP_FORCE_COPY_ARG		"force_copy"
 #define ETH_AF_XDP_USE_CNI_ARG			"use_cni"
+#define ETH_AF_XDP_SOCK_ARG			"sock"
 
 static const char * const valid_arguments[] = {
 	ETH_AF_XDP_IFACE_ARG,
@@ -201,6 +202,7 @@ static const char * const valid_arguments[] = {
 	ETH_AF_XDP_BUDGET_ARG,
 	ETH_AF_XDP_FORCE_COPY_ARG,
 	ETH_AF_XDP_USE_CNI_ARG,
+	ETH_AF_XDP_SOCK_ARG,
 	NULL
 };
 
@@ -1351,7 +1353,7 @@ err_prefer:
 }
 
 static int
-init_uds_sock(struct sockaddr_un *server)
+init_uds_sock(struct sockaddr_un *server, const char *sock_path)
 {
 	int sock;
 
@@ -1362,7 +1364,7 @@ init_uds_sock(struct sockaddr_un *server)
 	}
 
 	server->sun_family = AF_UNIX;
-	strlcpy(server->sun_path, UDS_SOCK, sizeof(server->sun_path));
+	strlcpy(server->sun_path, sock_path, sizeof(server->sun_path));
 
 	if (connect(sock, (struct sockaddr *)server, sizeof(struct sockaddr_un)) < 0) {
 		close(sock);
@@ -1382,7 +1384,7 @@ struct msg_internal {
 };
 
 static int
-send_msg(int sock, char *request, int *fd)
+send_msg(int sock, char *request, int *fd, const char *sock_path)
 {
 	int snd;
 	struct iovec iov;
@@ -1393,7 +1395,7 @@ send_msg(int sock, char *request, int *fd)
 
 	memset(&dst, 0, sizeof(dst));
 	dst.sun_family = AF_UNIX;
-	strlcpy(dst.sun_path, UDS_SOCK, sizeof(dst.sun_path));
+	strlcpy(dst.sun_path, sock_path, sizeof(dst.sun_path));
 
 	/* Initialize message header structure */
 	memset(&msgh, 0, sizeof(msgh));
@@ -1471,7 +1473,7 @@ read_msg(int sock, char *response, struct sockaddr_un *s, int *fd)
 
 static int
 make_request_cni(int sock, struct sockaddr_un *server, char *request,
-		 int *req_fd, char *response, int *out_fd)
+		 int *req_fd, char *response, int *out_fd, const char *sock_path)
 {
 	int rval;
 
@@ -1483,7 +1485,7 @@ make_request_cni(int sock, struct sockaddr_un *server, char *request,
 	if (req_fd == NULL)
 		rval = write(sock, request, strlen(request));
 	else
-		rval = send_msg(sock, request, req_fd);
+		rval = send_msg(sock, request, req_fd, sock_path);
 
 	if (rval < 0) {
 		AF_XDP_LOG(ERR, "Write error %s\n", strerror(errno));
@@ -1507,7 +1509,7 @@ check_response(char *response, char *exp_resp, long size)
 }
 
 static int
-get_cni_fd(char *if_name)
+get_cni_fd(char *if_name, const char *sock_path)
 {
 	char request[UDS_MAX_CMD_LEN], response[UDS_MAX_CMD_RESP];
 	char hostname[MAX_LONG_OPT_SZ], exp_resp[UDS_MAX_CMD_RESP];
@@ -1520,14 +1522,14 @@ get_cni_fd(char *if_name)
 		return -1;
 
 	memset(&server, 0, sizeof(server));
-	sock = init_uds_sock(&server);
+	sock = init_uds_sock(&server, sock_path);
 	if (sock < 0)
 		return -1;
 
 	/* Initiates handshake to CNI send: /connect,hostname */
 	snprintf(request, sizeof(request), "%s,%s", UDS_CONNECT_MSG, hostname);
 	memset(response, 0, sizeof(response));
-	if (make_request_cni(sock, &server, request, NULL, response, &out_fd) < 0) {
+	if (make_request_cni(sock, &server, request, NULL, response, &out_fd, sock_path) < 0) {
 		AF_XDP_LOG(ERR, "Error in processing cmd [%s]\n", request);
 		goto err_close;
 	}
@@ -1541,7 +1543,7 @@ get_cni_fd(char *if_name)
 	/* Request for "/version" */
 	strlcpy(request, UDS_VERSION_MSG, UDS_MAX_CMD_LEN);
 	memset(response, 0, sizeof(response));
-	if (make_request_cni(sock, &server, request, NULL, response, &out_fd) < 0) {
+	if (make_request_cni(sock, &server, request, NULL, response, &out_fd, sock_path) < 0) {
 		AF_XDP_LOG(ERR, "Error in processing cmd [%s]\n", request);
 		goto err_close;
 	}
@@ -1549,7 +1551,7 @@ get_cni_fd(char *if_name)
 	/* Request for file descriptor for netdev name*/
 	snprintf(request, sizeof(request), "%s,%s", UDS_XSK_MAP_FD_MSG, if_name);
 	memset(response, 0, sizeof(response));
-	if (make_request_cni(sock, &server, request, NULL, response, &out_fd) < 0) {
+	if (make_request_cni(sock, &server, request, NULL, response, &out_fd, sock_path) < 0) {
 		AF_XDP_LOG(ERR, "Error in processing cmd [%s]\n", request);
 		goto err_close;
 	}
@@ -1571,7 +1573,7 @@ get_cni_fd(char *if_name)
 	/* Initiate close connection */
 	strlcpy(request, UDS_FIN_MSG, UDS_MAX_CMD_LEN);
 	memset(response, 0, sizeof(response));
-	if (make_request_cni(sock, &server, request, NULL, response, &out_fd) < 0) {
+	if (make_request_cni(sock, &server, request, NULL, response, &out_fd, sock_path) < 0) {
 		AF_XDP_LOG(ERR, "Error in processing cmd [%s]\n", request);
 		goto err_close;
 	}
@@ -1698,7 +1700,7 @@ xsk_configure(struct pmd_internals *internals, struct pkt_rx_queue *rxq,
 		int err, fd, map_fd;
 
 		/* get socket fd from CNI plugin */
-		map_fd = get_cni_fd(internals->if_name);
+		map_fd = get_cni_fd(internals->if_name, internals->sock_path);
 		if (map_fd < 0) {
 			AF_XDP_LOG(ERR, "Failed to receive CNI plugin fd\n");
 			goto out_xsk;
@@ -2023,7 +2025,8 @@ xdp_get_channels_info(const char *if_name, int *max_queues,
 static int
 parse_parameters(struct rte_kvargs *kvlist, char *if_name, int *start_queue,
 		 int *queue_cnt, int *shared_umem, char *prog_path,
-		 int *busy_budget, int *force_copy, int *use_cni)
+		 int *busy_budget, int *force_copy, int *use_cni,
+		 char *sock_path)
 {
 	int ret;
 
@@ -2069,6 +2072,11 @@ parse_parameters(struct rte_kvargs *kvlist, char *if_name, int *start_queue,
 	if (ret < 0)
 		goto free_kvlist;
 
+	ret = rte_kvargs_process(kvlist, ETH_AF_XDP_SOCK_ARG,
+				 &parse_prog_arg, sock_path);
+	if (ret < 0)
+		goto free_kvlist;
+
 free_kvlist:
 	rte_kvargs_free(kvlist);
 	return ret;
@@ -2108,7 +2116,7 @@ static struct rte_eth_dev *
 init_internals(struct rte_vdev_device *dev, const char *if_name,
 	       int start_queue_idx, int queue_cnt, int shared_umem,
 	       const char *prog_path, int busy_budget, int force_copy,
-	       int use_cni)
+	       int use_cni, const char *sock_path)
 {
 	const char *name = rte_vdev_device_name(dev);
 	const unsigned int numa_node = dev->device.numa_node;
@@ -2138,6 +2146,7 @@ init_internals(struct rte_vdev_device *dev, const char *if_name,
 	internals->shared_umem = shared_umem;
 	internals->force_copy = force_copy;
 	internals->use_cni = use_cni;
+	strlcpy(internals->sock_path, sock_path, PATH_MAX);
 
 	if (xdp_get_channels_info(if_name, &internals->max_queue_cnt,
 				  &internals->combined_queue_cnt)) {
@@ -2328,6 +2337,7 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 	int busy_budget = -1, ret;
 	int force_copy = 0;
 	int use_cni = 0;
+	char sock_path[PATH_MAX] = {'\0'};
 	struct rte_eth_dev *eth_dev = NULL;
 	const char *name = rte_vdev_device_name(dev);
 
@@ -2370,7 +2380,7 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 
 	if (parse_parameters(kvlist, if_name, &xsk_start_queue_idx,
 			     &xsk_queue_cnt, &shared_umem, prog_path,
-			     &busy_budget, &force_copy, &use_cni) < 0) {
+			     &busy_budget, &force_copy, &use_cni, sock_path) < 0) {
 		AF_XDP_LOG(ERR, "Invalid kvargs value\n");
 		return -EINVAL;
 	}
@@ -2386,6 +2396,13 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 			ETH_AF_XDP_USE_CNI_ARG, ETH_AF_XDP_PROG_ARG);
 			return -EINVAL;
 	}
+
+	if (use_cni && !strnlen(sock_path, PATH_MAX)) {
+		AF_XDP_LOG(ERR, "When '%s' parameter is used, '%s' must also be provided\n",
+			ETH_AF_XDP_USE_CNI_ARG, ETH_AF_XDP_SOCK_ARG);
+			return -EINVAL;
+	}
+
 
 	if (strlen(if_name) == 0) {
 		AF_XDP_LOG(ERR, "Network interface must be specified\n");
@@ -2410,7 +2427,7 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 
 	eth_dev = init_internals(dev, if_name, xsk_start_queue_idx,
 				 xsk_queue_cnt, shared_umem, prog_path,
-				 busy_budget, force_copy, use_cni);
+				 busy_budget, force_copy, use_cni, sock_path);
 	if (eth_dev == NULL) {
 		AF_XDP_LOG(ERR, "Failed to init internals\n");
 		return -1;
@@ -2471,4 +2488,5 @@ RTE_PMD_REGISTER_PARAM_STRING(net_af_xdp,
 			      "xdp_prog=<string> "
 			      "busy_budget=<int> "
 			      "force_copy=<int> "
-			      "use_cni=<int> ");
+			      "use_cni=<int> "
+			      "sock=<string> ");
