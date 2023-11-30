@@ -171,6 +171,7 @@ struct pmd_internals {
 	bool force_copy;
 	bool use_cni;
 	char sock_path[PATH_MAX];
+	char map_pin_path[PATH_MAX];
 	struct bpf_map *map;
 
 	struct rte_ether_addr eth_addr;
@@ -191,7 +192,8 @@ struct pmd_process_private {
 #define ETH_AF_XDP_BUDGET_ARG			"busy_budget"
 #define ETH_AF_XDP_FORCE_COPY_ARG		"force_copy"
 #define ETH_AF_XDP_USE_CNI_ARG			"use_cni"
-#define ETH_AF_XDP_SOCK_ARG			"sock"
+#define ETH_AF_XDP_SOCK_ARG				"sock"
+#define ETH_AF_XDP_MAP_PIN_ARG			"pin_path"
 
 static const char * const valid_arguments[] = {
 	ETH_AF_XDP_IFACE_ARG,
@@ -203,6 +205,7 @@ static const char * const valid_arguments[] = {
 	ETH_AF_XDP_FORCE_COPY_ARG,
 	ETH_AF_XDP_USE_CNI_ARG,
 	ETH_AF_XDP_SOCK_ARG,
+    ETH_AF_XDP_MAP_PIN_ARG,
 	NULL
 };
 
@@ -1257,6 +1260,22 @@ err:
 #endif
 
 static int
+get_pinned_map(const char *pin_path, int *map_fd)
+{
+
+	*map_fd  = bpf_obj_get(pin_path);
+	if (!*map_fd) {
+		AF_XDP_LOG(ERR, "Failed to find xsks_map in %s\n", pin_path);
+		return -1;
+	}
+
+	AF_XDP_LOG(INFO, "Successfully retrieved map %s with fd %d\n",
+				pin_path, *map_fd);
+
+	return 0;
+}
+
+static int
 load_custom_xdp_prog(const char *prog_path, int if_index, struct bpf_map **map)
 {
 	int ret, prog_fd;
@@ -1642,7 +1661,7 @@ xsk_configure(struct pmd_internals *internals, struct pkt_rx_queue *rxq,
 #endif
 
 	/* Disable libbpf from loading XDP program */
-	if (internals->use_cni)
+	if (internals->use_cni || strnlen(internals->map_pin_path, PATH_MAX))
 		cfg.libbpf_flags |= XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD;
 
 	if (strnlen(internals->prog_path, PATH_MAX)) {
@@ -1696,22 +1715,32 @@ xsk_configure(struct pmd_internals *internals, struct pkt_rx_queue *rxq,
 		}
 	}
 
-	if (internals->use_cni) {
-		int err, fd, map_fd;
+	if (internals->use_cni || strnlen(internals->map_pin_path, PATH_MAX)) {
+		int err, map_fd = -1;
 
-		/* get socket fd from CNI plugin */
-		map_fd = get_cni_fd(internals->if_name, internals->sock_path);
-		if (map_fd < 0) {
-			AF_XDP_LOG(ERR, "Failed to receive CNI plugin fd\n");
-			goto out_xsk;
+		if (strnlen(internals->sock_path, PATH_MAX)) {
+            AF_XDP_LOG(INFO, "use_cni and socket set: %s\n", internals->sock_path);
+			/* get socket fd from CNI plugin */
+			map_fd = get_cni_fd(internals->if_name, internals->sock_path);
+			if (map_fd < 0) {
+				AF_XDP_LOG(ERR, "Failed to receive CNI plugin fd\n");
+				goto out_xsk;
+			}
+		} else {
+            AF_XDP_LOG(INFO, "map_pin_path set: %s\n", internals->map_pin_path);
+			err = get_pinned_map(internals->map_pin_path, &map_fd);
+			if (err < 0 || map_fd < 0) {
+				AF_XDP_LOG(ERR, "Failed to retrieve pinned map fd\n");
+				goto out_xsk;
+			}
 		}
-		/* get socket fd */
-		fd = xsk_socket__fd(rxq->xsk);
-		err = bpf_map_update_elem(map_fd, &rxq->xsk_queue_idx, &fd, 0);
+
+        err = xsk_socket__update_xskmap(rxq->xsk, map_fd);
 		if (err) {
 			AF_XDP_LOG(ERR, "Failed to insert unprivileged xsk in map.\n");
 			goto out_xsk;
 		}
+
 	} else if (rxq->busy_budget) {
 		ret = configure_preferred_busy_poll(rxq);
 		if (ret) {
@@ -2026,7 +2055,7 @@ static int
 parse_parameters(struct rte_kvargs *kvlist, char *if_name, int *start_queue,
 		 int *queue_cnt, int *shared_umem, char *prog_path,
 		 int *busy_budget, int *force_copy, int *use_cni,
-		 char *sock_path)
+		 char *sock_path, char *map_pin_path)
 {
 	int ret;
 
@@ -2077,6 +2106,11 @@ parse_parameters(struct rte_kvargs *kvlist, char *if_name, int *start_queue,
 	if (ret < 0)
 		goto free_kvlist;
 
+	ret = rte_kvargs_process(kvlist, ETH_AF_XDP_MAP_PIN_ARG,
+				 &parse_prog_arg, map_pin_path);
+	if (ret < 0)
+		goto free_kvlist;
+
 free_kvlist:
 	rte_kvargs_free(kvlist);
 	return ret;
@@ -2116,7 +2150,7 @@ static struct rte_eth_dev *
 init_internals(struct rte_vdev_device *dev, const char *if_name,
 	       int start_queue_idx, int queue_cnt, int shared_umem,
 	       const char *prog_path, int busy_budget, int force_copy,
-	       int use_cni, const char *sock_path)
+		   int use_cni, const char *sock_path, const char *map_pin_path)
 {
 	const char *name = rte_vdev_device_name(dev);
 	const unsigned int numa_node = dev->device.numa_node;
@@ -2147,6 +2181,7 @@ init_internals(struct rte_vdev_device *dev, const char *if_name,
 	internals->force_copy = force_copy;
 	internals->use_cni = use_cni;
 	strlcpy(internals->sock_path, sock_path, PATH_MAX);
+    strlcpy(internals->map_pin_path, map_pin_path, PATH_MAX);
 
 	if (xdp_get_channels_info(if_name, &internals->max_queue_cnt,
 				  &internals->combined_queue_cnt)) {
@@ -2185,7 +2220,7 @@ init_internals(struct rte_vdev_device *dev, const char *if_name,
 	}
 
 	ret = get_iface_info(if_name, &internals->eth_addr,
-			     &internals->if_index);
+				 &internals->if_index);
 	if (ret)
 		goto err_free_tx;
 
@@ -2338,6 +2373,7 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 	int force_copy = 0;
 	int use_cni = 0;
 	char sock_path[PATH_MAX] = {'\0'};
+	char map_pin_path[PATH_MAX] = {'\0'};
 	struct rte_eth_dev *eth_dev = NULL;
 	const char *name = rte_vdev_device_name(dev);
 
@@ -2379,8 +2415,9 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 	}
 
 	if (parse_parameters(kvlist, if_name, &xsk_start_queue_idx,
-			     &xsk_queue_cnt, &shared_umem, prog_path,
-			     &busy_budget, &force_copy, &use_cni, sock_path) < 0) {
+				 &xsk_queue_cnt, &shared_umem, prog_path,
+				 &busy_budget, &force_copy, &use_cni, sock_path,
+				 map_pin_path) < 0) {
 		AF_XDP_LOG(ERR, "Invalid kvargs value\n");
 		return -EINVAL;
 	}
@@ -2402,7 +2439,6 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 			ETH_AF_XDP_USE_CNI_ARG, ETH_AF_XDP_SOCK_ARG);
 			return -EINVAL;
 	}
-
 
 	if (strlen(if_name) == 0) {
 		AF_XDP_LOG(ERR, "Network interface must be specified\n");
@@ -2427,7 +2463,8 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 
 	eth_dev = init_internals(dev, if_name, xsk_start_queue_idx,
 				 xsk_queue_cnt, shared_umem, prog_path,
-				 busy_budget, force_copy, use_cni, sock_path);
+				 busy_budget, force_copy, use_cni, sock_path,
+                 map_pin_path);
 	if (eth_dev == NULL) {
 		AF_XDP_LOG(ERR, "Failed to init internals\n");
 		return -1;
@@ -2481,12 +2518,13 @@ static struct rte_vdev_driver pmd_af_xdp_drv = {
 
 RTE_PMD_REGISTER_VDEV(net_af_xdp, pmd_af_xdp_drv);
 RTE_PMD_REGISTER_PARAM_STRING(net_af_xdp,
-			      "iface=<string> "
-			      "start_queue=<int> "
-			      "queue_count=<int> "
-			      "shared_umem=<int> "
-			      "xdp_prog=<string> "
-			      "busy_budget=<int> "
-			      "force_copy=<int> "
-			      "use_cni=<int> "
-			      "sock=<string> ");
+				  "iface=<string> "
+				  "start_queue=<int> "
+				  "queue_count=<int> "
+				  "shared_umem=<int> "
+				  "xdp_prog=<string> "
+				  "busy_budget=<int> "
+				  "force_copy=<int> "
+				  "use_cni=<int> "
+				  "sock=<string> "
+                  "pin_path=<string> ");
