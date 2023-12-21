@@ -151,25 +151,32 @@ instead of zero copy mode (if available).
 
     --vdev net_af_xdp,iface=ens786f1,force_copy=1
 
-use_cni
-~~~~~~~
+uds_path
+~~~~~~~~
 
-The EAL vdev argument ``use_cni`` is used to indicate that the user wishes to
-enable the `AF_XDP Plugin for Kubernetes`_ within a DPDK application.
+The EAL vdev argument ``uds_path`` is used to indicate that the user wishes to
+use the `AF_XDP Plugin for Kubernetes`_ with a DPDK application running in a Pod.
 
 .. _AF_XDP Plugin for Kubernetes: https://github.com/intel/afxdp-plugins-for-kubernetes
 
 .. code-block:: console
 
-   --vdev=net_af_xdp0,use_cni=1
+   --vdev=net_af_xdp0,uds_path=/tmp/afxdp_dp/<interface-name>/afxdp.sock
 
 .. note::
 
-   When using `use_cni`_, both parameters `xdp_prog`_ and `busy_budget`_ are disabled
-   as both of these will be handled by the AF_XDP plugin.
-   Since the DPDK application is running in limited privileges
-   so enabling and disabling of the promiscuous mode through the DPDK application
-   is also not supported.
+   The UDS ``afxdp.sock`` is available in the DPDK container through a
+   volume mounted by the `AF_XDP Plugin for Kubernetes`_ at the path
+   specified in the example above.
+
+.. note::
+
+   When using `uds_path`_, both parameters `xdp_prog`_ and `busy_budget`_ are disabled
+   as both of these will be handled by the AF_XDP Device plugin (if required).
+   Since the pod/container is running with limited privileges enabling and disabling
+   of promiscuous mode through the DPDK application is also not supported.
+
+For more details please see: :doc:`../howto/af_xdp_dp`
 
 Limitations
 -----------
