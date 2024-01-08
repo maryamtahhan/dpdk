@@ -170,6 +170,7 @@ struct pmd_internals {
 	bool custom_prog_configured;
 	bool force_copy;
 	char uds_path[PATH_MAX];
+    char map_pin_path[PATH_MAX];
 	struct bpf_map *map;
 
 	struct rte_ether_addr eth_addr;
@@ -190,6 +191,7 @@ struct pmd_process_private {
 #define ETH_AF_XDP_BUDGET_ARG			"busy_budget"
 #define ETH_AF_XDP_FORCE_COPY_ARG		"force_copy"
 #define ETH_AF_XDP_USE_DP_UDS_PATH_ARG		"uds_path"
+#define ETH_AF_XDP_MAP_PIN_ARG				"pin_path"
 
 static const char * const valid_arguments[] = {
 	ETH_AF_XDP_IFACE_ARG,
@@ -200,6 +202,7 @@ static const char * const valid_arguments[] = {
 	ETH_AF_XDP_BUDGET_ARG,
 	ETH_AF_XDP_FORCE_COPY_ARG,
 	ETH_AF_XDP_USE_DP_UDS_PATH_ARG,
+	ETH_AF_XDP_MAP_PIN_ARG,
 	NULL
 };
 
@@ -1254,6 +1257,22 @@ err:
 #endif
 
 static int
+get_pinned_map(const char *pin_path, int *map_fd)
+{
+
+	*map_fd  = bpf_obj_get(pin_path);
+	if (!*map_fd) {
+		AF_XDP_LOG(ERR, "Failed to find xsks_map in %s\n", pin_path);
+		return -1;
+	}
+
+	AF_XDP_LOG(INFO, "Successfully retrieved map %s with fd %d\n",
+				pin_path, *map_fd);
+
+	return 0;
+}
+
+static int
 load_custom_xdp_prog(const char *prog_path, int if_index, struct bpf_map **map)
 {
 	int ret, prog_fd;
@@ -1639,7 +1658,7 @@ xsk_configure(struct pmd_internals *internals, struct pkt_rx_queue *rxq,
 #endif
 
 	/* Disable libbpf from loading XDP program */
-	if (strnlen(internals->uds_path, PATH_MAX))
+	if (strnlen(internals->uds_path, PATH_MAX) || strnlen(internals->map_pin_path, PATH_MAX))
 		cfg.libbpf_flags |= XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD;
 
 	if (strnlen(internals->prog_path, PATH_MAX)) {
@@ -1694,13 +1713,23 @@ xsk_configure(struct pmd_internals *internals, struct pkt_rx_queue *rxq,
 	}
 
 	if (strnlen(internals->uds_path, PATH_MAX)) {
-		int err, map_fd;
+		int err, map_fd = -1;
 
-		/* get socket fd from AF_XDP Device plugin */
-		map_fd = get_xskmap_fd(internals->if_name, internals->uds_path);
-		if (map_fd < 0) {
-			AF_XDP_LOG(ERR, "Failed to receive AF_XDP Device plugin fd\n");
-			goto out_xsk;
+		if (strnlen(internals->uds_path, PATH_MAX)) {
+			AF_XDP_LOG(INFO, "use_cni and socket set: %s\n", internals->uds_path);
+			/* get socket fd from CNI plugin */
+			map_fd = get_xskmap_fd(internals->if_name, internals->uds_path);
+			if (map_fd < 0) {
+				AF_XDP_LOG(ERR, "Failed to receive CNI plugin fd\n");
+				goto out_xsk;
+			}
+		} else {
+			AF_XDP_LOG(INFO, "map_pin_path set: %s\n", internals->map_pin_path);
+			err = get_pinned_map(internals->map_pin_path, &map_fd);
+			if (err < 0 || map_fd < 0) {
+				AF_XDP_LOG(ERR, "Failed to retrieve pinned map fd\n");
+				goto out_xsk;
+			}
 		}
 
 		err = xsk_socket__update_xskmap(rxq->xsk, map_fd);
@@ -1708,6 +1737,7 @@ xsk_configure(struct pmd_internals *internals, struct pkt_rx_queue *rxq,
 			AF_XDP_LOG(ERR, "Failed to insert unprivileged xsk in map.\n");
 			goto out_xsk;
 		}
+
 	} else if (rxq->busy_budget) {
 		ret = configure_preferred_busy_poll(rxq);
 		if (ret) {
@@ -2021,7 +2051,8 @@ xdp_get_channels_info(const char *if_name, int *max_queues,
 static int
 parse_parameters(struct rte_kvargs *kvlist, char *if_name, int *start_queue,
 		 int *queue_cnt, int *shared_umem, char *prog_path,
-		 int *busy_budget, int *force_copy, char *uds_path)
+		 int *busy_budget, int *force_copy, char *uds_path,
+		 char *map_pin_path)
 {
 	int ret;
 
@@ -2067,6 +2098,11 @@ parse_parameters(struct rte_kvargs *kvlist, char *if_name, int *start_queue,
 	if (ret < 0)
 		goto free_kvlist;
 
+	ret = rte_kvargs_process(kvlist, ETH_AF_XDP_MAP_PIN_ARG,
+			 &parse_path_arg, map_pin_path);
+	if (ret < 0)
+		goto free_kvlist;
+
 free_kvlist:
 	rte_kvargs_free(kvlist);
 	return ret;
@@ -2106,7 +2142,7 @@ static struct rte_eth_dev *
 init_internals(struct rte_vdev_device *dev, const char *if_name,
 	       int start_queue_idx, int queue_cnt, int shared_umem,
 	       const char *prog_path, int busy_budget, int force_copy,
-		   const char *uds_path)
+		   const char *uds_path, const char *map_pin_path)
 {
 	const char *name = rte_vdev_device_name(dev);
 	const unsigned int numa_node = dev->device.numa_node;
@@ -2136,6 +2172,7 @@ init_internals(struct rte_vdev_device *dev, const char *if_name,
 	internals->shared_umem = shared_umem;
 	internals->force_copy = force_copy;
 	strlcpy(internals->uds_path, uds_path, PATH_MAX);
+	strlcpy(internals->map_pin_path, map_pin_path, PATH_MAX);
 
 	if (xdp_get_channels_info(if_name, &internals->max_queue_cnt,
 				  &internals->combined_queue_cnt)) {
@@ -2326,6 +2363,7 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 	int busy_budget = -1, ret;
 	int force_copy = 0;
 	char uds_path[PATH_MAX] = {'\0'};
+    char map_pin_path[PATH_MAX] = {'\0'};
 	struct rte_eth_dev *eth_dev = NULL;
 	const char *name = rte_vdev_device_name(dev);
 
@@ -2368,7 +2406,7 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 
 	if (parse_parameters(kvlist, if_name, &xsk_start_queue_idx,
 			     &xsk_queue_cnt, &shared_umem, prog_path,
-				 &busy_budget, &force_copy, uds_path) < 0) {
+				 &busy_budget, &force_copy, uds_path, map_pin_path) < 0) {
 		AF_XDP_LOG(ERR, "Invalid kvargs value\n");
 		return -EINVAL;
 	}
@@ -2382,6 +2420,12 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 	if (strnlen(uds_path, PATH_MAX) && strnlen(prog_path, PATH_MAX)) {
 		AF_XDP_LOG(ERR, "When '%s' parameter is used, '%s' parameter is not valid\n",
 			ETH_AF_XDP_USE_DP_UDS_PATH_ARG, ETH_AF_XDP_PROG_ARG);
+			return -EINVAL;
+	}
+
+	if (strnlen(uds_path, PATH_MAX) && strnlen(map_pin_path, PATH_MAX)) {
+		AF_XDP_LOG(ERR, "When '%s' parameter is used, '%s' parameter is not valid\n",
+			ETH_AF_XDP_USE_DP_UDS_PATH_ARG, ETH_AF_XDP_MAP_PIN_ARG);
 			return -EINVAL;
 	}
 
@@ -2408,7 +2452,7 @@ rte_pmd_af_xdp_probe(struct rte_vdev_device *dev)
 
 	eth_dev = init_internals(dev, if_name, xsk_start_queue_idx,
 				 xsk_queue_cnt, shared_umem, prog_path,
-				 busy_budget, force_copy, uds_path);
+				 busy_budget, force_copy, uds_path, map_pin_path);
 	if (eth_dev == NULL) {
 		AF_XDP_LOG(ERR, "Failed to init internals\n");
 		return -1;
@@ -2469,4 +2513,5 @@ RTE_PMD_REGISTER_PARAM_STRING(net_af_xdp,
 			      "xdp_prog=<string> "
 			      "busy_budget=<int> "
 			      "force_copy=<int> "
-			      "uds_path=<string> ");
+			      "uds_path=<string> "
+			      "pin_path=<string> ");
