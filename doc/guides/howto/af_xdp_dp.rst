@@ -52,13 +52,18 @@ should be used when creating the socket
 to instruct libbpf not to load the default libbpf program on the netdev.
 Instead the loading is handled by the AF_XDP Device Plugin.
 
+The EAL vdev argument ``dp_path`` is used alongside the ``use_cni`` argument
+to explicitly tell the AF_XDP PMD where to find the UDS to interact with the
+AF_XDP Device Plugin. If this argument is not passed alongside the ``use_cni``
+argument then the AF_XDP PMD configures it internally.
+
 Limitations
 -----------
 
 For DPDK versions <= v23.11 the Unix Domain Socket file path appears in
 the pod at "/tmp/afxdp.sock". The handshake implementation in the AF_XDP PMD
-is only compatible with the AF_XDP Device Plugin up to commit id `38317c2`_
-and the pod is limited to a single netdev.
+is only compatible with the `AF_XDP Device Plugin for Kubernetes`_  up to
+commit id `38317c2`_ and the pod is limited to a single netdev.
 
 .. note::
 
@@ -75,6 +80,14 @@ in the PMD alongside the `use_cni` parameter.
 
 .. _38317c2: https://github.com/intel/afxdp-plugins-for-kubernetes/commit/38317c256b5c7dfb39e013a0f76010c2ded03669
 
+.. note::
+
+    The introduction of the ``dp_path`` EAL vdev argument fixes the limitation above. If a
+    user doesn't explicitly set the ``dp_path``parameter when using ``use_cni`` then that
+    path is transparently configured in the AF_XDP PMD to the default
+    `AF_XDP Device Plugin for Kubernetes`_ mount point path. This is compatible with the latest
+    AF_XDP Device Plugin. For backwards compatibility with versions of the AF_XDP DP <= commit
+    id `38317c2`_ please explicitly set ``dp_path`` to ``/tmp/afxdp.sock``.
 
 Prerequisites
 -------------
@@ -105,10 +118,10 @@ Device Plugin and DPDK container prerequisites:
 
   .. code-block:: console
 
-     cat << EOF | sudo tee /etc/systemd/system/containerd.service.d/limits.conf
-     [Service]
-     LimitMEMLOCK=infinity
-     EOF
+    cat << EOF | sudo tee /etc/systemd/system/containerd.service.d/limits.conf
+    [Service]
+    LimitMEMLOCK=infinity
+    EOF
 
 * dpdk-testpmd application should have AF_XDP feature enabled.
 
@@ -284,7 +297,7 @@ Run dpdk-testpmd with the AF_XDP Device Plugin + CNI
         emptyDir:
           medium: HugePages
 
-  For further reference please use the `pod.yaml`_
+  For further reference please see the `pod.yaml`_
 
   .. _pod.yaml: https://github.com/intel/afxdp-plugins-for-kubernetes/blob/main/examples/pod-spec.yaml
 
@@ -297,3 +310,19 @@ Run dpdk-testpmd with the AF_XDP Device Plugin + CNI
            --vdev=net_af_xdp0,use_cni=1,iface=<interface name> \
            --no-mlockall --in-memory \
            -- -i --a --nb-cores=2 --rxq=1 --txq=1 --forward-mode=macswap;
+
+  Or
+
+  .. code-block:: console
+
+     kubectl exec -i <Pod name> --container <containers name> -- \
+           /<Path>/dpdk-testpmd -l 0,1 --no-pci \
+           --vdev=net_af_xdp0,use_cni=1,iface=<interface name>,dp_path="/tmp/afxdp_dp/<interface name>/afxdp.sock" \
+           --no-mlockall --in-memory \
+           -- -i --a --nb-cores=2 --rxq=1 --txq=1 --forward-mode=macswap;
+
+.. note::
+
+    If the ``dp_path`` parameter isn't explicitly set (like the example above)
+    the AF_XDP PMD will set the parameter value to
+    ``/tmp/afxdp_dp/<<interface name>>/afxdp.sock``.
