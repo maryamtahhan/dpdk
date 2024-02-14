@@ -63,6 +63,16 @@ New Features
   compatibility for any applications already using the ``use_cni`` vdev
   argument with the AF_XDP Device Plugin.
 
+* **Integrated AF_XDP PMD with AF_XDP Device Plugin eBPF map pinning support**.
+
+  The EAL vdev argument for the AF_XDP PMD ``use_map_pinning`` was added
+  to allow Kubernetes Pods to use AF_XDP with DPDK, and run  with limited
+  privileges, without having to do a full handshake over a Unix Domain
+  Socket with the Device Plugin. This flag indicates that the AF_XDP PMD
+  will be used in unprivileged mode and will obtain the XSKMAP FD by calling
+  ``bpf_obj_get()`` for an xskmap pinned (by the AF_XDP DP) inside the
+  container.
+
 Removed Items
 -------------
 
